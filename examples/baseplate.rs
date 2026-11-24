@@ -18,6 +18,7 @@ mod windows_demo {
         Headset,
         Probe,
         Preview(PathBuf),
+        WalkPreview(PathBuf),
     }
 
     pub fn run() -> Result<()> {
@@ -31,6 +32,7 @@ mod windows_demo {
         let mut lab = false;
         let mut ray_tracing = None;
         let mut assets = PathBuf::from("assets/reflection-lab");
+        let mut session_options = openxr::SessionOptions::default();
         while let Some(arg) = args.next() {
             let mut value = || -> Result<OsString> {
                 args.next()
@@ -39,11 +41,16 @@ mod windows_demo {
             match arg.to_str() {
                 Some("--probe") => mode = Mode::Probe,
                 Some("--preview") => mode = Mode::Preview(value()?.into()),
+                Some("--walk-preview") => {
+                    mode = Mode::WalkPreview(value()?.into());
+                    lab = true;
+                }
                 Some("--loader") => loader = Some(value()?.into()),
                 Some("--game") => game = Some(PathBuf::from(value()?)),
                 Some("--shader") => shader = Some(PathBuf::from(value()?)),
                 Some("--hdr") => hdr = Some(PathBuf::from(value()?)),
                 Some("--lab") => lab = true,
+                Some("--no-mirror") => session_options.desktop_mirror = false,
                 Some("--assets") => assets = value()?.into(),
                 Some("--raytracing") => {
                     ray_tracing = Some(match value()?.to_str() {
@@ -55,7 +62,7 @@ mod windows_demo {
                 Some("--scale") => render_scale = value()?.to_string_lossy().parse()?,
                 Some("--help") => {
                     println!(
-                        "baseplate [--probe | --preview output.png] [--lab] [--raytracing on|off] [--assets directory] [--loader path] [--game game.lua] [--shader surface.hlsl] [--hdr sky.hdr] [--scale 0.4..1.0]"
+                        "baseplate [--probe | --preview output.png | --walk-preview output.png] [--lab] [--no-mirror] [--raytracing on|off] [--assets directory] [--loader path] [--game game.lua] [--shader surface.hlsl] [--hdr sky.hdr] [--scale 0.4..1.0]"
                     );
                     return Ok(());
                 }
@@ -116,15 +123,59 @@ mod windows_demo {
         }
         match mode {
             Mode::Probe => unreachable!(),
-            Mode::Headset => {
-                openxr::run_with_renderer(loader.as_deref(), render_scale, renderer, |frame| {
+            Mode::Headset => openxr::run_session(
+                loader.as_deref(),
+                render_scale,
+                session_options,
+                renderer,
+                |frame| {
                     Ok(scene.tick(
                         &frame.tracking,
                         frame.elapsed,
                         frame.reference_changed,
                         false,
                     )?)
-                })
+                },
+            ),
+            Mode::WalkPreview(path) => {
+                let mut head = Pose {
+                    position: Vec3::Y * 1.69,
+                    orientation: Quat::IDENTITY,
+                };
+                let mut tracking = TrackingFrame {
+                    controller_grips: [-1.0, 1.0].map(|side| {
+                        Some(Pose {
+                            position: Vec3::new(side * 0.28, 1.47, -0.55),
+                            orientation: Quat::from_rotation_y(-side * 0.22),
+                        })
+                    }),
+                    ..Default::default()
+                };
+                let elapsed = Duration::from_millis(20);
+                for height in [1.69, 1.65, 1.65, 1.65, 1.65, 1.65, 1.69]
+                    .into_iter()
+                    .cycle()
+                    .take(28)
+                {
+                    head.position.y = height;
+                    tracking.head = Some(head);
+                    scene.tick(&tracking, elapsed, false, false)?;
+                }
+                let (world, offset) = scene.tick(&tracking, elapsed, false, false)?;
+                let camera = Camera {
+                    position: head.position + offset,
+                    orientation: Quat::from_rotation_x(-0.10),
+                    fov: [-0.88, 0.88, -0.50, 0.50],
+                };
+                let mut renderer = renderer(d3d11::create_device(None)?)?;
+                renderer.upload(&world)?;
+                renderer.capture_png(1440, 810, camera, world.cloud_density, &path)?;
+                println!(
+                    "Walking preview: {}. Simulated advance: {:.2} m.",
+                    path.display(),
+                    offset.length()
+                );
+                Ok(())
             }
             Mode::Preview(path) => {
                 if lab {

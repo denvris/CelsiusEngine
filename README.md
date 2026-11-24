@@ -33,7 +33,11 @@ cargo run --locked --release --example baseplate
 
 For Quest 3S, enable hand tracking and the developer runtime features available in the Link app. The probe prints the headset system name and whether the runtime supplies articulated hands and body tracking. The demo can open with head tracking alone when hands are unavailable.
 
-Start upright and hold still while the first valid head pose calibrates height. Bend slightly and rise past your starting height to move horizontally in the direction you're facing. Repeat to keep moving. Thumb-to-index pinches leave colored markers and pulse the beacon. Look down to see the avatar. The headset supplies the head pose and valid hand joints, including fingers. The avatar uses torso and arm joints from `XR_FB_body_tracking` and lower-body joints from `XR_META_body_tracking_full_body` when the runtime supplies them. The runtime may synthesize leg poses. When those joints are unavailable, the engine estimates the pose from the head, hands, and locomotion. `--probe` reports runtime capability for both extensions.
+Start upright and hold still while the first valid head pose calibrates height. March in place with a small vertical bounce and return near your starting height on each step. The engine advances horizontally in the direction the headset is facing, and turning your head steers the movement. It eases to a stop when you stop stepping. Thumb-to-index pinches leave colored markers and pulse the beacon. Look down to see the avatar. The headset supplies the head pose and valid hand joints, including fingers. The avatar uses torso and arm joints from `XR_FB_body_tracking` and lower-body joints from `XR_META_body_tracking_full_body` when the runtime supplies them. The runtime may synthesize leg poses. When those joints are unavailable, the engine estimates the pose from the head, hands, and locomotion. `--probe` reports runtime capability for both extensions.
+
+### Desktop gameplay mirror
+
+OpenXR projects open a Windows window named **Celsius Engine - VR Gameplay** by default. In OBS, add a Window Capture source and select that window. It shows the rendered left eye and preserves the eye's aspect ratio. The desktop uses an asynchronous GPU copy of the existing frame and can skip presentation when its swapchain is busy. Closing the desktop window leaves VR running. Disable it with `--no-mirror` or set `SessionOptions::desktop_mirror` to false when calling `openxr::run_session`.
 
 ### Preview on Windows without a headset
 
@@ -69,7 +73,7 @@ The currently supported geometry is boxes, segments and spheres. General mesh im
 
 ## Reflection Lab
 
-`Probar-Reflejos.cmd` opens a second PCVR test alongside the original Baseplate launcher. Six spheres show chrome, brushed metal, solid glass, glazed ceramic, varnished wood, and concrete. The high-contrast panel has five progressively finer line groups, and a second panel behind the starting viewpoint makes scene reflections easy to distinguish from sky reflections. The glass sphere uses a refractive index of 1.50, separate entry and exit refraction, Fresnel reflectance, and thickness-based absorption.
+`Probar-Reflejos.cmd` opens a second PCVR test alongside the original Baseplate launcher. It shows first-person hands in cyan and orange. When optical tracking is available, the model follows the tracked fingers. If a hand loses optical tracking while a controller is tracked, the model follows the grip with a fixed finger pose. Controller poses do not generate optical pinch events. Use the same march-in-place movement as Baseplate to approach the spheres. Six spheres show chrome, brushed metal, solid glass, glazed ceramic, varnished wood, and concrete. The high-contrast panel has five progressively finer line groups, and a second panel behind the starting viewpoint makes scene reflections easy to distinguish from sky reflections. The glass sphere uses a refractive index of 1.50, separate entry and exit refraction, Fresnel reflectance, and thickness-based absorption.
 
 For the portable build, extract the complete Reflection Lab ZIP to its own folder and run the launcher beside its bundled `baseplate.exe`. `Unknown option: --lab` means the executable is from the earlier Baseplate-only build. The launcher writes the most recent startup output to `%TEMP%\CelsiusEngine-ReflectionLab.log`. Use `Probar-Reflejos.cmd --probe` to check headset detection with no renderer startup, or `Probar-Reflejos.cmd --preview reflection-preview.png` to test desktop rendering independently of Link. If the runtime reports broker IPC errors or an unavailable headset, open Meta Horizon Link on the PC and first confirm that you can enter the Link environment inside the headset.
 
@@ -80,6 +84,7 @@ For the portable build, extract the complete Reflection Lab ZIP to its own folde
 # Compare the same scene with scene ray queries on and off.
 cargo run --locked --release --example baseplate -- --lab --preview target/reflections-on.png
 cargo run --locked --release --example baseplate -- --lab --raytracing off --preview target/reflections-off.png
+cargo run --locked --release --example baseplate -- --walk-preview target/reflections-walk.png
 
 # In Quest Link, start with the lab default. Lower the per-eye scale to compare performance.
 .\GameTest\Probar-Reflejos.cmd --scale 0.65

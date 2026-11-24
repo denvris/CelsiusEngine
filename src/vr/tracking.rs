@@ -69,6 +69,41 @@ pub struct Pose {
 #[derive(Default)]
 pub struct HandFrame(pub [Option<Pose>; 26]);
 
+impl HandFrame {
+    pub fn is_visible(&self) -> bool {
+        self.0[0].is_some() || self.0[1].is_some()
+    }
+
+    /// A relaxed hand model anchored to a tracked controller grip. Render-only.
+    pub fn from_grip(grip: Pose, left: bool) -> Self {
+        let side = if left { -1.0 } else { 1.0 };
+        let point = |x, y, z| {
+            Some(Pose {
+                position: grip.position + grip.orientation * Vec3::new(x, y, z),
+                orientation: grip.orientation,
+            })
+        };
+        let mut joints = [None; 26];
+        joints[1] = point(0.0, 0.0, 0.045);
+        joints[0] = point(0.0, 0.0, 0.0);
+        for i in 0..4 {
+            let t = i as f32 / 3.0;
+            joints[2 + i] = point(
+                -side * (0.022 + 0.021 * t),
+                0.011 + 0.017 * t,
+                0.017 - 0.048 * t,
+            );
+        }
+        for (finger, length) in [0.074, 0.082, 0.075, 0.061].into_iter().enumerate() {
+            let x = side * (-0.026 + 0.017 * finger as f32);
+            for (j, t) in [0.0_f32, 0.33, 0.60, 0.83, 1.0].into_iter().enumerate() {
+                joints[6 + finger * 5 + j] = point(x, -0.042 * t * t, 0.002 - length * t);
+            }
+        }
+        Self(joints)
+    }
+}
+
 #[derive(Default)]
 pub struct BodyFrame {
     pub chest: Option<Vec3>,
@@ -83,6 +118,7 @@ pub struct BodyFrame {
 pub struct TrackingFrame {
     pub head: Option<Pose>,
     pub hands: [HandFrame; 2],
+    pub controller_grips: [Option<Pose>; 2],
     pub body: BodyFrame,
 }
 
@@ -97,7 +133,7 @@ pub struct Avatar {
 #[derive(Default)]
 pub struct PlayerTracking {
     pub offset: Vec3,
-    velocity: Vec3,
+    speed: f32,
     heading: Vec3,
     gait: f32,
     detector: Option<HeadBobDetector>,
@@ -107,7 +143,8 @@ pub struct PlayerTracking {
 impl PlayerTracking {
     pub fn reset_reference(&mut self) {
         self.detector = None;
-        self.velocity = Vec3::ZERO;
+        self.speed = 0.0;
+        self.heading = Vec3::ZERO;
         self.pinching = [false; 2];
     }
 
@@ -120,7 +157,6 @@ impl PlayerTracking {
         speed: f32,
         limit: f32,
     ) -> mlua::Result<()> {
-        let mut target = Vec3::ZERO;
         if let Some(head) = frame.head {
             let forward = (head.orientation * Vec3::NEG_Z).with_y(0.0);
             if forward.length_squared() > 0.05 {
@@ -135,18 +171,25 @@ impl PlayerTracking {
                 .is_some_and(|detector| detector.update(Some(head.position.y), elapsed))
             {
                 callbacks.locomotion_step()?;
-                self.velocity = self.heading * speed;
+                self.speed = if self.heading == Vec3::ZERO {
+                    0.0
+                } else {
+                    speed
+                };
             }
-            target = self.velocity;
         } else {
             self.detector = None;
-            self.velocity = Vec3::ZERO;
+            self.speed = 0.0;
+            self.heading = Vec3::ZERO;
         }
 
         let dt = elapsed.as_secs_f32().min(0.05);
-        self.offset = (self.offset + target * dt).clamp(Vec3::splat(-limit), Vec3::splat(limit));
-        self.gait += target.length() * dt * 8.0;
-        self.velocity *= (-5.0 * dt).exp();
+        let decay = (-5.0 * dt).exp();
+        let distance = self.speed * (1.0 - decay) / 5.0;
+        self.offset =
+            (self.offset + self.heading * distance).clamp(Vec3::splat(-limit), Vec3::splat(limit));
+        self.gait += distance * 8.0;
+        self.speed *= decay;
 
         for (i, hand) in [Hand::Left, Hand::Right].into_iter().enumerate() {
             let joints = &frame.hands[i].0;
@@ -212,7 +255,7 @@ impl PlayerTracking {
             }
             let side = i as f32 * 2.0 - 1.0;
             let hip = hips + right * side * 0.11;
-            let stride = self.gait.sin() * side * self.velocity.length().min(1.0);
+            let stride = self.gait.sin() * side * self.speed.min(1.0);
             let foot = (hip + heading * (0.04 + 0.18 * stride))
                 .with_y(floor + 0.07 + stride.max(0.0) * 0.09);
             let knee = bend(hip, foot, heading, 0.46, 0.45);

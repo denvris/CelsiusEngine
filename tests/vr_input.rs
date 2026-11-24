@@ -156,3 +156,45 @@ fn reflection_lab_keeps_geometry_when_ray_tracing_is_disabled() -> mlua::Result<
     assert_eq!(disabled.cloud_density, enabled.cloud_density);
     Ok(())
 }
+
+#[test]
+fn reflection_lab_walks_towards_gaze_and_renders_controller_hands() -> mlua::Result<()> {
+    let script = ScriptRuntime::new()?;
+    let mut lab = LuaScene::load(
+        &script,
+        "@reflection_lab.lua",
+        include_str!("../examples/reflection_lab.lua"),
+    )?;
+    let grip = Pose {
+        position: Vec3::new(-0.25, 1.4, -0.55),
+        orientation: Quat::IDENTITY,
+    };
+    let yaw = Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+    let mut frame = TrackingFrame {
+        controller_grips: [Some(grip), None],
+        ..Default::default()
+    };
+    for height in [1.69, 1.65, 1.65, 1.65] {
+        frame.head = Some(Pose {
+            position: Vec3::Y * height,
+            orientation: yaw,
+        });
+        let (_, offset) = lab.tick(&frame, Duration::from_millis(40), false, false)?;
+        assert_eq!(offset, Vec3::ZERO);
+    }
+    frame.head.as_mut().unwrap().position.y = 1.69;
+    let (world, offset) = lab.tick(&frame, Duration::from_millis(40), false, false)?;
+    assert!(offset.x > 0.0 && offset.z.abs() < 1e-5 && offset.y == 0.0);
+    assert!(
+        world.boxes[world.traced_boxes..]
+            .iter()
+            .any(|mesh| { mesh.center.distance(grip.position + offset) < 1e-5 })
+    );
+    frame.head.as_mut().unwrap().orientation = Quat::IDENTITY;
+    let (_, turned) = lab.tick(&frame, Duration::from_millis(40), false, false)?;
+    assert!((turned.x - offset.x).abs() < 1e-5 && turned.z < 0.0);
+    frame.head = None;
+    let (_, stopped) = lab.tick(&frame, Duration::from_millis(40), false, false)?;
+    assert_eq!(turned, stopped);
+    Ok(())
+}

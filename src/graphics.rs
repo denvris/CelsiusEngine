@@ -2,6 +2,8 @@ use glam::{Mat4, Quat, Vec3, Vec4};
 
 #[cfg(all(windows, target_pointer_width = "64"))]
 pub mod d3d11;
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub(crate) mod desktop_mirror;
 
 #[derive(Clone, Copy)]
 pub struct Camera {

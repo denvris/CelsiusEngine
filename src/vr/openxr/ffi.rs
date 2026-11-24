@@ -22,6 +22,8 @@ pub const VALID_POSE: Flags = 3;
 pub const VALID_POSITION: Flags = 2;
 pub const TRACKED_POSE: Flags = 15;
 pub const EVENT_UNAVAILABLE: Code = 4;
+pub const PATH_UNSUPPORTED: Code = -22;
+pub const POSE_INPUT: i32 = 4;
 pub const SPACE_UNSUPPORTED: Code = -31;
 pub const STATE_READY: i32 = 2;
 pub const STATE_FOCUSED: i32 = 5;
@@ -111,6 +113,20 @@ pub struct BodyJoint {
     pub pose: RawPose,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ActionBinding {
+    pub action: Handle,
+    pub binding: Handle,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ActiveActionSet {
+    pub action_set: Handle,
+    pub subaction: Handle,
+}
+
 xr_struct!(Extension, 2, name: [c_char; 128], version: u32);
 xr_struct!(InstanceInfo, 3, flags: Flags, app: AppInfo, layer_count: u32, layers: *const *const c_char, extension_count: u32, extensions: *const *const c_char);
 xr_struct!(SystemInfo, 4, form_factor: i32);
@@ -124,17 +140,23 @@ xr_struct!(ViewState, 11, flags: Flags);
 xr_struct!(FrameEnd, 12, time: Time, blend: i32, count: u32, layers: *const *const Projection);
 xr_struct!(Event, 16, payload: [u8; 4000]);
 xr_struct!(SessionStateEvent, 18, session: Handle, state: i32, time: Time);
+xr_struct!(ActionSetInfo, 28, name: [c_char; 64], localized_name: [c_char; 128], priority: u32);
+xr_struct!(ActionInfo, 29, name: [c_char; 64], kind: i32, subaction_count: u32, subactions: *const Handle, localized_name: [c_char; 128]);
 xr_struct!(FrameWait, 33,);
 xr_struct!(Projection, 35, flags: Flags, space: Handle, view_count: u32, views: *const ProjectionView);
 xr_struct!(SpaceInfo, 37, kind: i32, pose: RawPose);
+xr_struct!(ActionSpaceInfo, 38, action: Handle, subaction: Handle, pose: RawPose);
 xr_struct!(ViewConfig, 41, width: u32, max_width: u32, height: u32, max_height: u32, samples: u32, max_samples: u32);
 xr_struct!(SpaceLocation, 42, flags: Flags, pose: RawPose);
 xr_struct!(FrameState, 44, time: Time, period: i64, should_render: u32);
 xr_struct!(FrameBegin, 46,);
 xr_struct!(ProjectionView, 48, pose: RawPose, fov: [f32; 4], image: SubImage);
+xr_struct!(SuggestedBindings, 51, profile: Handle, count: u32, bindings: *const ActionBinding);
 xr_struct!(ImageAcquire, 55,);
 xr_struct!(ImageWait, 56, timeout: i64);
 xr_struct!(ImageRelease, 57,);
+xr_struct!(AttachActionSets, 60, count: u32, sets: *const Handle);
+xr_struct!(SyncActions, 61, count: u32, sets: *const ActiveActionSet);
 xr_struct!(D3dBinding, 1000027000, device: *mut c_void);
 xr_struct!(D3dImage, 1000027001, texture: *mut c_void);
 xr_struct!(D3dRequirements, 1000027002, luid: LUID, feature_level: D3D_FEATURE_LEVEL);
@@ -211,6 +233,14 @@ xr_functions!(Api {
     xrCreateReferenceSpace(Handle, *const SpaceInfo, *mut Handle),
     xrDestroySpace(Handle),
     xrLocateSpace(Handle, Handle, Time, *mut SpaceLocation),
+    xrStringToPath(Handle, *const c_char, *mut Handle),
+    xrCreateActionSet(Handle, *const ActionSetInfo, *mut Handle),
+    xrDestroyActionSet(Handle),
+    xrCreateAction(Handle, *const ActionInfo, *mut Handle),
+    xrSuggestInteractionProfileBindings(Handle, *const SuggestedBindings),
+    xrCreateActionSpace(Handle, *const ActionSpaceInfo, *mut Handle),
+    xrAttachSessionActionSets(Handle, *const AttachActionSets),
+    xrSyncActions(Handle, *const SyncActions),
     xrEnumerateSwapchainFormats(Handle, u32, *mut u32, *mut i64),
     xrCreateSwapchain(Handle, *const SwapchainInfo, *mut Handle),
     xrDestroySwapchain(Handle),

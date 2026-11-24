@@ -1,3 +1,4 @@
+mod controllers;
 mod ffi;
 
 use std::{
@@ -12,7 +13,7 @@ use glam::{Quat, Vec3};
 use libloading::os::windows::Library;
 use windows::{
     Win32::Graphics::{
-        Direct3D11::ID3D11Device,
+        Direct3D11::{ID3D11Device, ID3D11Texture2D},
         Dxgi::Common::{
             DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
         },
@@ -24,6 +25,7 @@ use super::{BodyFrame, HandFrame, Pose, TrackingFrame};
 use crate::graphics::{
     Camera, Scene,
     d3d11::{self, RenderTarget, Renderer},
+    desktop_mirror::DesktopMirror,
 };
 use ffi::*;
 
@@ -57,6 +59,7 @@ struct Runtime {
 struct EyeTarget {
     // Drop D3D render-target views before destroying their OpenXR swapchain.
     target: RenderTarget,
+    images: Vec<ID3D11Texture2D>,
     swapchain: OwnedHandle,
     image: SubImage,
 }
@@ -65,6 +68,18 @@ pub struct Frame {
     pub tracking: TrackingFrame,
     pub elapsed: Duration,
     pub reference_changed: bool,
+}
+
+pub struct SessionOptions {
+    pub desktop_mirror: bool,
+}
+
+impl Default for SessionOptions {
+    fn default() -> Self {
+        Self {
+            desktop_mirror: true,
+        }
+    }
 }
 
 pub fn probe(loader: Option<&Path>) -> Result<()> {
@@ -101,6 +116,22 @@ pub fn run_with_renderer(
     loader: Option<&Path>,
     render_scale: f32,
     renderer: impl FnOnce(ID3D11Device) -> Result<Renderer>,
+    scene: impl FnMut(Frame) -> Result<(Scene, Vec3)>,
+) -> Result<()> {
+    run_session(
+        loader,
+        render_scale,
+        SessionOptions::default(),
+        renderer,
+        scene,
+    )
+}
+
+pub fn run_session(
+    loader: Option<&Path>,
+    render_scale: f32,
+    options: SessionOptions,
+    renderer: impl FnOnce(ID3D11Device) -> Result<Renderer>,
     mut scene: impl FnMut(Frame) -> Result<(Scene, Vec3)>,
 ) -> Result<()> {
     if !render_scale.is_finite() || !(0.4..=1.0).contains(&render_scale) {
@@ -121,7 +152,7 @@ pub fn run_with_renderer(
     )?;
     let device = d3d11::create_device(Some((requirements.luid, requirements.feature_level)))?;
     let session = runtime.session(&device)?;
-    let mut renderer = renderer(device)?;
+    let mut renderer = renderer(device.clone())?;
     eprintln!("OpenXR: creating stereo swapchains.");
     let view_space = reference_space(api, session.raw, VIEW_SPACE)?;
     let (world_space, local_floor) = match try_space(api, session.raw, STAGE_SPACE) {
@@ -195,6 +226,25 @@ pub fn run_with_renderer(
         EyeTarget::new(api, session.raw, &renderer, left, format, render_scale)?,
         EyeTarget::new(api, session.raw, &renderer, right, format, render_scale)?,
     ];
+    let mut mirror = if options.desktop_mirror {
+        DesktopMirror::new(
+            &device,
+            targets[0].image.width as u32,
+            targets[0].image.height as u32,
+            DXGI_FORMAT(format.try_into()?),
+        )
+        .inspect_err(|error| eprintln!("Desktop mirror unavailable: {error}"))
+        .ok()
+    } else {
+        None
+    };
+    if let Some(window) = &mirror {
+        window.show();
+        eprintln!("Desktop mirror: Celsius Engine - VR Gameplay.");
+    }
+    let controllers = controllers::GripInput::new(api, instance, session.raw)
+        .inspect_err(|error| eprintln!("OpenXR: controller hand fallback unavailable: {error}"))
+        .ok();
     let trackers = runtime
         .hand_api
         .as_ref()
@@ -204,7 +254,10 @@ pub fn run_with_renderer(
                 create_hand(hand, session.raw, 2)?,
             ])
         })
-        .transpose()?;
+        .transpose()
+        .inspect_err(|error| eprintln!("OpenXR: optical hand tracking unavailable: {error}"))
+        .ok()
+        .flatten();
     let body_tracker = runtime.body_api.as_ref().and_then(|body| {
         match create_body(body, session.raw, runtime.full_body) {
             Ok(tracker) => Some(tracker),
@@ -229,6 +282,9 @@ pub fn run_with_renderer(
     let mut ready_deadline = Some(Instant::now() + Duration::from_secs(45));
     eprintln!("OpenXR: waiting for the runtime to mark the session ready.");
     loop {
+        if mirror.as_ref().is_some_and(|mirror| !mirror.pump()) {
+            mirror = None;
+        }
         loop {
             let mut event = Event::default();
             let code = unsafe { (api.xrPollEvent)(instance, &mut event) };
@@ -367,9 +423,15 @@ pub fn run_with_renderer(
                     runtime.full_body,
                 )?;
                 tracking.body = sample;
-                if trackers.is_none() {
-                    tracking.hands = body_hands;
+                for (hand, body_hand) in tracking.hands.iter_mut().zip(body_hands) {
+                    if !hand.is_visible() {
+                        *hand = body_hand;
+                    }
                 }
+            }
+            if focused && let Some(controllers) = &controllers {
+                tracking.controller_grips =
+                    controllers.sample(api, session.raw, world_space.raw, frame.time, shift)?;
             }
             let (world, player_offset) = scene(Frame {
                 tracking,
@@ -380,7 +442,9 @@ pub fn run_with_renderer(
             renderer.upload(&world)?;
 
             let mut projection = [ProjectionView::default(); 2];
-            for ((projection, view), eye) in projection.iter_mut().zip(views).zip(&targets) {
+            for (index, ((projection, view), eye)) in
+                projection.iter_mut().zip(views).zip(&targets).enumerate()
+            {
                 let eye_pose = pose(view.pose, shift);
                 // XrFovf stores up before down. The renderer uses bottom before top.
                 let [l, r, t, b] = view.fov.map(f32::tan);
@@ -390,7 +454,8 @@ pub fn run_with_renderer(
                     fov: [l, r, b, t],
                 };
 
-                eye.render(api, &renderer, camera, world.cloud_density)?;
+                let desktop = if index == 0 { mirror.as_mut() } else { None };
+                eye.render(api, &renderer, camera, world.cloud_density, desktop)?;
                 *projection = ProjectionView {
                     pose: view.pose,
                     fov: view.fov,
@@ -422,6 +487,12 @@ pub fn run_with_renderer(
         };
         work?;
         check(end_result, "xrEndFrame")?;
+        if let Some(window) = &mut mirror
+            && let Err(error) = window.present()
+        {
+            eprintln!("Desktop mirror stopped: {error}");
+            mirror = None;
+        }
     }
 }
 
@@ -630,11 +701,19 @@ impl EyeTarget {
         Ok(Self {
             swapchain,
             target,
+            images: textures,
             image,
         })
     }
 
-    fn render(&self, api: &Api, renderer: &Renderer, camera: Camera, clouds: f32) -> Result<()> {
+    fn render(
+        &self,
+        api: &Api,
+        renderer: &Renderer,
+        camera: Camera,
+        clouds: f32,
+        desktop: Option<&mut DesktopMirror>,
+    ) -> Result<()> {
         let mut index = 0;
         let raw = self.swapchain.raw;
         check(
@@ -650,6 +729,11 @@ impl EyeTarget {
             "xrWaitSwapchainImage",
         )?;
         let draw = renderer.draw(&self.target, index as usize, camera, clouds);
+        if draw.is_ok()
+            && let Some(desktop) = desktop
+        {
+            desktop.copy_eye(&self.images[index as usize]);
+        }
         let release = unsafe { (api.xrReleaseSwapchainImage)(raw, &ImageRelease::default()) };
         draw?;
         check(release, "xrReleaseSwapchainImage")
@@ -672,8 +756,8 @@ fn enumerate<T: Copy>(
     Ok(values)
 }
 
-fn fixed_name(name: &CStr) -> [c_char; 128] {
-    let mut out = [0; 128];
+fn fixed_name<const N: usize>(name: &CStr) -> [c_char; N] {
+    let mut out = [0; N];
     for (out, byte) in out.iter_mut().zip(name.to_bytes()) {
         *out = *byte as c_char;
     }

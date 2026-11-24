@@ -91,17 +91,36 @@ impl LuaScene {
             });
         }
         scene.traced_boxes = scene.boxes.len();
-        self.append_avatar(&mut scene, frame, show_head);
+        let hands_only = self
+            .module
+            .raw_get::<Option<bool>>("hands_only")?
+            .unwrap_or(false);
+        self.append_avatar(&mut scene, frame, show_head, hands_only);
         Ok((scene, offset))
     }
 
-    fn append_avatar(&self, scene: &mut Scene, tracking: &TrackingFrame, show_head: bool) {
+    fn append_avatar(
+        &self,
+        scene: &mut Scene,
+        tracking: &TrackingFrame,
+        show_head: bool,
+        hands_only: bool,
+    ) {
         let slate = Vec3::new(0.08, 0.15, 0.24);
         let trim = Vec3::new(0.16, 0.24, 0.38);
         let skins = [Vec3::new(0.02, 0.68, 0.72), Vec3::new(0.98, 0.38, 0.11)];
         let offset = self.tracking.offset;
 
-        for (hand, color) in tracking.hands.iter().zip(skins) {
+        for (i, (hand, color)) in tracking.hands.iter().zip(skins).enumerate() {
+            let fallback;
+            let hand = if !hand.is_visible()
+                && let Some(grip) = tracking.controller_grips[i]
+            {
+                fallback = crate::vr::HandFrame::from_grip(grip, i == 0);
+                &fallback
+            } else {
+                hand
+            };
             for &(a, b) in &HAND_BONES {
                 if let Some((a, b)) = hand.0[a].zip(hand.0[b]) {
                     let width = if b.position.distance(a.position) > 0.055 {
@@ -121,13 +140,16 @@ impl LuaScene {
                 scene.boxes.push(BoxMesh {
                     center: palm.position + offset,
                     orientation: palm.orientation,
-                    size: Vec3::new(0.066, 0.022, 0.071),
+                    size: Vec3::new(0.074, 0.031, 0.076),
                     color,
                     material: 0.0,
                 });
             }
         }
 
+        if hands_only {
+            return;
+        }
         let Some(avatar) = self.tracking.avatar(tracking, 0.0) else {
             return;
         };

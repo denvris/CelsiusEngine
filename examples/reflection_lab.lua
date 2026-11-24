@@ -4,6 +4,7 @@ local lab = {
     cloud_density = 0.72,
     step_speed = 2.2,
     movement_limit = 8.0,
+    hands_only = true,
 }
 
 local function box(position, size, color, material)
