@@ -60,6 +60,8 @@ Set `step_speed` in m/s to tune the initial pulse of motion, or use 0 to disable
 
 The raster renderer draws the Lua scene and avatar into separate per-eye sRGB swapchains, with depth testing, a shared sun shadow map, linear lighting, filmic tone mapping, and an optional volumetric cloud layer. `--scale 0.4..1.0` sets the per-eye resolution as a proportion of the recommendations from the runtime. The default is 0.75.
 
+OpenXR swapchain images use an explicit D3D11 render-target view in the selected sRGB format. This supports runtimes that return typeless swapchain textures. The desktop PNG preview exercises the same typed-view creation against a typeless texture.
+
 - `--hdr path/to/sky.hdr` loads a linear equirectangular Radiance HDR image for the sky and directional environmental color. The current ambient term samples the panorama directly.
 - `--shader path/to/surface.hlsl` replaces the default surface function. Start from [default_surface.hlsl](src/graphics/default_surface.hlsl). Supply `float3 shade_surface(Surface s)` and return a linear color. `s` exposes world position, normal, vertex color, and the Lua material identifier. Shader code also has access to the current eye's camera and view/projection matrices, `environment(ray)`, and `sunlight_visibility(world, normal)`. The engine applies exposure-independent tone mapping and handles stereo submission.
 
@@ -68,6 +70,8 @@ The currently supported geometry is boxes, segments and spheres. General mesh im
 ## Reflection Lab
 
 `Probar-Reflejos.cmd` opens a second PCVR test alongside the original Baseplate launcher. Six spheres show chrome, brushed metal, solid glass, glazed ceramic, varnished wood, and concrete. The high-contrast panel has five progressively finer line groups, and a second panel behind the starting viewpoint makes scene reflections easy to distinguish from sky reflections. The glass sphere uses a refractive index of 1.50, separate entry and exit refraction, Fresnel reflectance, and thickness-based absorption.
+
+For the portable build, extract the complete Reflection Lab ZIP to its own folder and run the launcher beside its bundled `baseplate.exe`. `Unknown option: --lab` means the executable is from the earlier Baseplate-only build. The launcher writes the most recent startup output to `%TEMP%\CelsiusEngine-ReflectionLab.log`. Use `Probar-Reflejos.cmd --probe` to check headset detection with no renderer startup, or `Probar-Reflejos.cmd --preview reflection-preview.png` to test desktop rendering independently of Link. If the runtime reports broker IPC errors or an unavailable headset, open Meta Horizon Link on the PC and first confirm that you can enter the Link environment inside the headset.
 
 ```powershell
 # Optional 4K materials and photographed HDR sky. Run once from the repository root.

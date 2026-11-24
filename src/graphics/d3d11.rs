@@ -300,6 +300,7 @@ impl Renderer {
         images: &[ID3D11Texture2D],
         width: u32,
         height: u32,
+        format: DXGI_FORMAT,
     ) -> Result<RenderTarget> {
         let mut colors = Vec::with_capacity(images.len());
         let mut depth = None;
@@ -312,16 +313,33 @@ impl Renderer {
                 D3D11_BIND_DEPTH_STENCIL,
             ),
             None,
-        )?;
+        )
+        .map_err(|error| format!("Creating D3D11 depth texture ({width}x{height}): {error}"))?;
+        // OpenXR can expose typeless textures. Bind the concrete swapchain format.
+        let color_view = D3D11_RENDER_TARGET_VIEW_DESC {
+            Format: format,
+            ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 {
+                Texture2D: D3D11_TEX2D_RTV { MipSlice: 0 },
+            },
+        };
         unsafe {
-            for image in images {
+            for (index, image) in images.iter().enumerate() {
                 let mut rtv = None;
                 self.device
-                    .CreateRenderTargetView(image, None, Some(&mut rtv))?;
+                    .CreateRenderTargetView(image, Some(&color_view), Some(&mut rtv))
+                    .map_err(|error| {
+                        let mut desc = D3D11_TEXTURE2D_DESC::default();
+                        image.GetDesc(&mut desc);
+                        format!("Creating D3D11 color view for image {index} ({width}x{height}, resource format {}, view format {}): {error}", desc.Format.0, format.0)
+                    })?;
                 colors.push(rtv);
             }
             self.device
-                .CreateDepthStencilView(&depth_texture, None, Some(&mut depth))?;
+                .CreateDepthStencilView(&depth_texture, None, Some(&mut depth))
+                .map_err(|error| {
+                    format!("Creating D3D11 depth view ({width}x{height}): {error}")
+                })?;
         }
         Ok(RenderTarget {
             colors,
@@ -504,16 +522,22 @@ impl Renderer {
         let desc = texture_desc(
             width,
             height,
-            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+            DXGI_FORMAT_R8G8B8A8_TYPELESS,
             D3D11_BIND_RENDER_TARGET,
         );
         let color = texture(&self.device, desc, None)?;
-        let target = self.target(slice::from_ref(&color), width, height)?;
+        let target = self.target(
+            slice::from_ref(&color),
+            width,
+            height,
+            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+        )?;
         self.draw(&target, 0, camera, clouds)?;
 
         let staging = texture(
             &self.device,
             D3D11_TEXTURE2D_DESC {
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
                 BindFlags: 0,
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                 Usage: D3D11_USAGE_STAGING,

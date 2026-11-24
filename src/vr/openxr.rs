@@ -5,7 +5,7 @@ use std::{
     ffi::{CStr, c_char},
     path::Path,
     ptr, thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use glam::{Quat, Vec3};
@@ -13,7 +13,9 @@ use libloading::os::windows::Library;
 use windows::{
     Win32::Graphics::{
         Direct3D11::ID3D11Device,
-        Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB},
+        Dxgi::Common::{
+            DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+        },
     },
     core::Interface,
 };
@@ -105,6 +107,10 @@ pub fn run_with_renderer(
         return Err("Render scale must be between 0.4 and 1.0".into());
     }
     let runtime = Runtime::connect(loader)?;
+    eprintln!(
+        "OpenXR: selected headset {}. Creating D3D11 session.",
+        runtime.system_name
+    );
     let api = &runtime.api;
     let instance = runtime.instance.raw;
     let system = runtime.system;
@@ -116,6 +122,7 @@ pub fn run_with_renderer(
     let device = d3d11::create_device(Some((requirements.luid, requirements.feature_level)))?;
     let session = runtime.session(&device)?;
     let mut renderer = renderer(device)?;
+    eprintln!("OpenXR: creating stereo swapchains.");
     let view_space = reference_space(api, session.raw, VIEW_SPACE)?;
     let (world_space, local_floor) = match try_space(api, session.raw, STAGE_SPACE) {
         (SPACE_UNSUPPORTED, _) => (reference_space(api, session.raw, LOCAL_SPACE)?, true),
@@ -219,6 +226,8 @@ pub fn run_with_renderer(
     let mut focused = false;
     let mut reset = true;
     let mut previous_time = None;
+    let mut ready_deadline = Some(Instant::now() + Duration::from_secs(45));
+    eprintln!("OpenXR: waiting for the runtime to mark the session ready.");
     loop {
         loop {
             let mut event = Event::default();
@@ -248,6 +257,8 @@ pub fn run_with_renderer(
                                 "xrBeginSession",
                             )?;
                             running = true;
+                            ready_deadline = None;
+                            eprintln!("OpenXR: stereo session started.");
                         }
                         STATE_STOPPING => {
                             check(unsafe { (api.xrEndSession)(session.raw) }, "xrEndSession")?;
@@ -268,6 +279,9 @@ pub fn run_with_renderer(
             }
         }
         if !running {
+            if ready_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err("OpenXR session did not become ready within 45 seconds. Enter the active PCVR runtime inside the headset and launch again.".into());
+            }
             thread::sleep(Duration::from_millis(12));
             continue;
         }
@@ -436,6 +450,7 @@ impl Runtime {
         })?;
         let get = unsafe { *loader.get::<GetProc>(b"xrGetInstanceProcAddr\0")? };
         let global = Global::load(get, 0)?;
+        eprintln!("OpenXR: querying the active runtime's extensions.");
         let extensions = enumerate(
             Extension::default(),
             |capacity, count, data| unsafe {
@@ -477,6 +492,7 @@ impl Runtime {
             ..Default::default()
         };
         let mut raw = 0;
+        eprintln!("OpenXR: creating the runtime instance.");
         check(
             unsafe { (global.xrCreateInstance)(&info, &mut raw) },
             "xrCreateInstance",
@@ -492,6 +508,7 @@ impl Runtime {
             form_factor: HMD,
             ..Default::default()
         };
+        eprintln!("OpenXR: looking for a headset.");
         check(
             unsafe { (api.xrGetSystem)(raw, &info, &mut system) },
             "xrGetSystem",
@@ -603,7 +620,7 @@ impl EyeTarget {
             .map(|image| unsafe { d3d11::borrow_image(image.texture) })
             .collect::<Option<Vec<_>>>()
             .ok_or("OpenXR returned a null D3D11 swapchain texture")?;
-        let target = renderer.target(&textures, width, height)?;
+        let target = renderer.target(&textures, width, height, DXGI_FORMAT(format.try_into()?))?;
         let image = SubImage {
             swapchain: raw,
             width: width.try_into()?,
