@@ -11,6 +11,8 @@ mod windows_demo {
         },
     };
     use glam::{Mat4, Quat, Vec3};
+    const LAB_SHADER: &str = include_str!("reflection_lab.hlsl");
+    const LAB_GAME: &str = include_str!("reflection_lab.lua");
 
     enum Mode {
         Headset,
@@ -26,6 +28,9 @@ mod windows_demo {
         let mut shader = None;
         let mut hdr = None;
         let mut render_scale = 0.75;
+        let mut lab = false;
+        let mut ray_tracing = None;
+        let mut assets = PathBuf::from("assets/reflection-lab");
         while let Some(arg) = args.next() {
             let mut value = || -> Result<OsString> {
                 args.next()
@@ -38,10 +43,19 @@ mod windows_demo {
                 Some("--game") => game = Some(PathBuf::from(value()?)),
                 Some("--shader") => shader = Some(PathBuf::from(value()?)),
                 Some("--hdr") => hdr = Some(PathBuf::from(value()?)),
+                Some("--lab") => lab = true,
+                Some("--assets") => assets = value()?.into(),
+                Some("--raytracing") => {
+                    ray_tracing = Some(match value()?.to_str() {
+                        Some("on") => true,
+                        Some("off") => false,
+                        _ => return Err("--raytracing expects on or off".into()),
+                    });
+                }
                 Some("--scale") => render_scale = value()?.to_string_lossy().parse()?,
                 Some("--help") => {
                     println!(
-                        "baseplate [--probe | --preview output.png] [--loader path] [--game game.lua] [--shader surface.hlsl] [--hdr sky.hdr] [--scale 0.4..1.0]"
+                        "baseplate [--probe | --preview output.png] [--lab] [--raytracing on|off] [--assets directory] [--loader path] [--game game.lua] [--shader surface.hlsl] [--hdr sky.hdr] [--scale 0.4..1.0]"
                     );
                     return Ok(());
                 }
@@ -53,35 +67,84 @@ mod windows_demo {
             return openxr::probe(loader.as_deref());
         }
         let surface = shader.map(fs::read_to_string).transpose()?;
-        let surface = surface.as_deref().unwrap_or(d3d11::DEFAULT_SURFACE);
+        let surface = surface.as_deref().unwrap_or(if lab {
+            LAB_SHADER
+        } else {
+            d3d11::DEFAULT_SURFACE
+        });
+        if lab && hdr.is_none() {
+            let default_sky = assets.join("kloppenheim_05_puresky_4k.hdr");
+            if default_sky.try_exists()? {
+                hdr = Some(default_sky);
+            }
+        }
+        let renderer = |device| -> Result<d3d11::Renderer> {
+            let mut renderer = d3d11::Renderer::new(device, surface, hdr.as_deref())?;
+            if lab {
+                let loaded = renderer.load_material_maps(&assets)?;
+                println!(
+                    "Reflection lab: {loaded}/4 material maps, HDRI: {}",
+                    hdr.is_some()
+                );
+            }
+            Ok(renderer)
+        };
         let scripts = ScriptRuntime::new()?;
         let source = game.as_ref().map(fs::read_to_string).transpose()?;
         let name = game.as_ref().map_or_else(
-            || "@examples/baseplate.lua".to_owned(),
+            || {
+                if lab {
+                    "@examples/reflection_lab.lua"
+                } else {
+                    "@examples/baseplate.lua"
+                }
+                .to_owned()
+            },
             |path| format!("@{}", path.display()),
         );
         let mut scene = LuaScene::load(
             &scripts,
             &name,
-            source.as_deref().unwrap_or(include_str!("baseplate.lua")),
+            source.as_deref().unwrap_or(if lab {
+                LAB_GAME
+            } else {
+                include_str!("baseplate.lua")
+            }),
         )?;
+        if let Some(enabled) = ray_tracing {
+            scene.module().raw_set("ray_tracing", enabled)?;
+        }
         match mode {
             Mode::Probe => unreachable!(),
-            Mode::Headset => openxr::run(
-                loader.as_deref(),
-                surface,
-                hdr.as_deref(),
-                render_scale,
-                |frame| {
+            Mode::Headset => {
+                openxr::run_with_renderer(loader.as_deref(), render_scale, renderer, |frame| {
                     Ok(scene.tick(
                         &frame.tracking,
                         frame.elapsed,
                         frame.reference_changed,
                         false,
                     )?)
-                },
-            ),
+                })
+            }
             Mode::Preview(path) => {
+                if lab {
+                    let (world, _) =
+                        scene.tick(&TrackingFrame::default(), Duration::ZERO, false, false)?;
+                    let camera = preview_camera(
+                        Vec3::new(0.0, 2.18, 1.15),
+                        Vec3::new(0.0, 1.29, -4.45),
+                        [-0.72, 0.72, -0.38, 0.38],
+                    );
+                    let mut renderer = renderer(d3d11::create_device(None)?)?;
+                    renderer.upload(&world)?;
+                    renderer.capture_png(1440, 810, camera, world.cloud_density, &path)?;
+                    println!(
+                        "Reflection lab preview: {}. Scene rays: {}.",
+                        path.display(),
+                        world.ray_tracing
+                    );
+                    return Ok(());
+                }
                 let mut tracking = TrackingFrame {
                     head: Some(Pose {
                         position: Vec3::new(0.0, 1.67, 0.0),
@@ -123,6 +186,17 @@ mod windows_demo {
                 );
                 Ok(())
             }
+        }
+    }
+
+    fn preview_camera(position: Vec3, target: Vec3, fov: [f32; 4]) -> Camera {
+        let (_, orientation, position) = Mat4::look_at_rh(position, target, Vec3::Y)
+            .inverse()
+            .to_scale_rotation_translation();
+        Camera {
+            position,
+            orientation,
+            fov,
         }
     }
 

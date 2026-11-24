@@ -1,4 +1,4 @@
-use std::{error::Error, ffi::c_void, path::Path, ptr, slice};
+use std::{error::Error, ffi::c_void, path::Path, ptr, slice, sync::OnceLock};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -14,7 +14,7 @@ use windows::{
     core::{Interface, PCSTR, s},
 };
 
-use super::{BoxMesh, Camera, Scene};
+use super::{BoxMesh, Camera, Scene, SphereMesh};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub const DEFAULT_SURFACE: &str = include_str!("default_surface.hlsl");
@@ -58,6 +58,7 @@ struct Vertex {
     normal: [f32; 3],
     color: [f32; 3],
     material: f32,
+    sphere: [f32; 4],
 }
 
 #[repr(C)]
@@ -68,7 +69,25 @@ struct Eye {
     light_view_projection: [[f32; 4]; 4],
     camera: [f32; 4],
     settings: [f32; 4],
+    material_maps: [f32; 4],
 }
+
+const MAX_RAY_OBJECTS: usize = 32;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RayObject {
+    center_radius: [f32; 4],
+    extent_material: [f32; 4],
+    color: [f32; 4],
+}
+
+const MATERIAL_MAPS: [&str; 4] = [
+    "concrete_floor_diff_4k.jpg",
+    "concrete_floor_rough_4k.jpg",
+    "wood_table_001_diff_4k.jpg",
+    "wood_table_001_rough_4k.jpg",
+];
 
 pub struct Renderer {
     device: ID3D11Device,
@@ -83,6 +102,11 @@ pub struct Renderer {
     shadow: ShadowMap,
     sky: Option<ID3D11ShaderResourceView>,
     eye: ID3D11Buffer,
+    ray_buffer: ID3D11Buffer,
+    ray_count: usize,
+    ray_tracing: bool,
+    maps: [Option<ID3D11ShaderResourceView>; 4],
+    material_sampler: ID3D11SamplerState,
     vertex_buffer: ID3D11Buffer,
     vertex_capacity: usize,
     vertices: Vec<Vertex>,
@@ -164,19 +188,26 @@ pub struct RenderTarget {
 
 impl Renderer {
     pub fn new(device: ID3D11Device, surface: &str, hdri: Option<&Path>) -> Result<Self> {
-        let source = format!("{}\n{}", include_str!("shaders.hlsl"), surface);
+        let source = format!(
+            "{}\n{}\n{}",
+            include_str!("shaders.hlsl"),
+            include_str!("ray_tracing.hlsl"),
+            surface
+        );
         let sky_vs = compile(&source, s!("sky_vs"), s!("vs_5_0"))?;
         let sky_ps = compile(&source, s!("sky_ps"), s!("ps_5_0"))?;
         let mesh_vs = compile(&source, s!("mesh_vs"), s!("vs_5_0"))?;
         let mesh_ps = compile(&source, s!("mesh_ps"), s!("ps_5_0"))?;
         let elements = [
-            (s!("POSITION"), DXGI_FORMAT_R32G32B32_FLOAT, 0),
-            (s!("NORMAL"), DXGI_FORMAT_R32G32B32_FLOAT, 12),
-            (s!("COLOR"), DXGI_FORMAT_R32G32B32_FLOAT, 24),
-            (s!("TEXCOORD"), DXGI_FORMAT_R32_FLOAT, 36),
+            (s!("POSITION"), 0, DXGI_FORMAT_R32G32B32_FLOAT, 0),
+            (s!("NORMAL"), 0, DXGI_FORMAT_R32G32B32_FLOAT, 12),
+            (s!("COLOR"), 0, DXGI_FORMAT_R32G32B32_FLOAT, 24),
+            (s!("TEXCOORD"), 0, DXGI_FORMAT_R32_FLOAT, 36),
+            (s!("TEXCOORD"), 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 40),
         ]
-        .map(|(name, format, offset)| D3D11_INPUT_ELEMENT_DESC {
+        .map(|(name, index, format, offset)| D3D11_INPUT_ELEMENT_DESC {
             SemanticName: name,
+            SemanticIndex: index,
             Format: format,
             AlignedByteOffset: offset,
             ..Default::default()
@@ -198,12 +229,21 @@ impl Renderer {
             MaxLOD: f32::MAX,
             ..Default::default()
         };
-        let (mut rasterizer_state, mut sampler_state) = (None, None);
+        let (mut rasterizer_state, mut sampler_state, mut material_sampler) = (None, None, None);
         let context = unsafe { device.GetImmediateContext()? };
         unsafe {
             device.CreateInputLayout(&elements, &mesh_vs, Some(&mut layout))?;
             device.CreateRasterizerState(&rasterizer, Some(&mut rasterizer_state))?;
             device.CreateSamplerState(&sampler, Some(&mut sampler_state))?;
+            device.CreateSamplerState(
+                &D3D11_SAMPLER_DESC {
+                    Filter: D3D11_FILTER_ANISOTROPIC,
+                    AddressV: D3D11_TEXTURE_ADDRESS_WRAP,
+                    MaxAnisotropy: 8,
+                    ..sampler
+                },
+                Some(&mut material_sampler),
+            )?;
         }
         let vertex_capacity = 4096;
         Ok(Self {
@@ -218,6 +258,15 @@ impl Renderer {
             shadow: ShadowMap::new(&device)?,
             sky: hdri.map(|path| load_hdr(&device, path)).transpose()?,
             eye: dynamic_buffer(&device, size_of::<Eye>(), D3D11_BIND_CONSTANT_BUFFER)?,
+            ray_buffer: dynamic_buffer(
+                &device,
+                size_of::<[RayObject; MAX_RAY_OBJECTS]>(),
+                D3D11_BIND_CONSTANT_BUFFER,
+            )?,
+            ray_count: 0,
+            ray_tracing: false,
+            maps: Default::default(),
+            material_sampler: material_sampler.unwrap(),
             vertex_buffer: dynamic_buffer(
                 &device,
                 vertex_capacity * size_of::<Vertex>(),
@@ -227,6 +276,23 @@ impl Renderer {
             vertices: Vec::with_capacity(vertex_capacity),
             device,
         })
+    }
+
+    pub fn load_material_maps(&mut self, directory: &Path) -> Result<usize> {
+        let mut loaded = 0;
+        for (i, name) in MATERIAL_MAPS.iter().enumerate() {
+            let path = directory.join(name);
+            if path.try_exists()? {
+                self.maps[i] = Some(load_material_map(
+                    &self.device,
+                    &self.context,
+                    &path,
+                    i % 2 == 0,
+                )?);
+                loaded += 1;
+            }
+        }
+        Ok(loaded)
     }
 
     pub fn target(
@@ -273,6 +339,15 @@ impl Renderer {
         self.vertices.clear();
         for mesh in &scene.boxes {
             append_box(&mut self.vertices, mesh);
+        }
+        for mesh in &scene.spheres {
+            append_sphere(&mut self.vertices, mesh);
+        }
+        self.ray_tracing = scene.ray_tracing;
+        if self.ray_tracing {
+            self.upload_ray_objects(scene)?;
+        } else {
+            self.ray_count = 0;
         }
         if self.vertices.len() > self.vertex_capacity {
             let capacity = self.vertices.len().next_power_of_two();
@@ -330,9 +405,13 @@ impl Renderer {
                 settings: [
                     f32::from(u8::from(self.sky.is_some())),
                     cloud_density,
-                    0.0,
-                    0.0,
+                    u8::from(self.ray_tracing) as f32,
+                    self.ray_count as f32,
                 ],
+                material_maps: self
+                    .maps
+                    .each_ref()
+                    .map(|map| u8::from(map.is_some()) as f32),
             }),
         )?;
         let color = target
@@ -359,6 +438,11 @@ impl Renderer {
             ctx.OMSetRenderTargets(Some(targets), &target.depth);
             ctx.PSSetShaderResources(1, Some(&[Some(self.shadow.view.clone())]));
             ctx.PSSetSamplers(1, Some(&[Some(self.shadow.sampler.clone())]));
+            if self.ray_tracing {
+                ctx.PSSetConstantBuffers(1, Some(&[Some(self.ray_buffer.clone())]));
+            }
+            ctx.PSSetShaderResources(2, Some(&self.maps));
+            ctx.PSSetSamplers(2, Some(&[Some(self.material_sampler.clone())]));
             ctx.PSSetShader(&self.mesh_ps, None);
             self.draw_mesh();
             ctx.OMSetRenderTargets(None, None::<&ID3D11DepthStencilView>);
@@ -366,6 +450,31 @@ impl Renderer {
             ctx.Flush();
         }
         Ok(())
+    }
+
+    fn upload_ray_objects(&mut self, scene: &Scene) -> Result<()> {
+        let spheres = scene.spheres.iter().map(|mesh| RayObject {
+            center_radius: mesh.center.extend(mesh.radius).to_array(),
+            extent_material: Vec3::ZERO.extend(mesh.material).to_array(),
+            color: mesh.color.extend(1.0).to_array(),
+        });
+        let boxes = scene
+            .boxes
+            .iter()
+            .take(scene.traced_boxes)
+            .filter(|mesh| mesh.orientation.abs_diff_eq(glam::Quat::IDENTITY, 0.0001))
+            .map(|mesh| RayObject {
+                center_radius: mesh.center.extend(0.0).to_array(),
+                extent_material: (mesh.size * 0.5).extend(mesh.material).to_array(),
+                color: mesh.color.extend(1.0).to_array(),
+            });
+        let mut objects = [RayObject::zeroed(); MAX_RAY_OBJECTS];
+        self.ray_count = 0;
+        for (slot, object) in objects.iter_mut().zip(spheres.chain(boxes)) {
+            *slot = object;
+            self.ray_count += 1;
+        }
+        self.write_buffer(&self.ray_buffer, bytemuck::cast_slice(&objects))
     }
 
     fn draw_mesh(&self) {
@@ -466,10 +575,50 @@ fn append_box(vertices: &mut Vec<Vertex>, mesh: &BoxMesh) {
                     normal: (mesh.orientation * normal).to_array(),
                     color: mesh.color.to_array(),
                     material: mesh.material,
+                    sphere: [0.0; 4],
                 });
             }
         }
     }
+}
+
+fn append_sphere(vertices: &mut Vec<Vertex>, mesh: &SphereMesh) {
+    static UNIT_SPHERE: OnceLock<Vec<Vec3>> = OnceLock::new();
+    let normals = UNIT_SPHERE.get_or_init(|| {
+        let (rings, sectors) = (24, 48);
+        let point = |r, s| {
+            let (y_sin, y_cos) = (std::f32::consts::PI * r as f32 / rings as f32).sin_cos();
+            let (sin, cos) = (std::f32::consts::TAU * s as f32 / sectors as f32).sin_cos();
+            Vec3::new(y_sin * sin, y_cos, -y_sin * cos)
+        };
+        let mut unit = Vec::new();
+        for r in 0..rings {
+            for s in 0..sectors {
+                let (a, b, c, d) = (
+                    point(r, s),
+                    point(r + 1, s),
+                    point(r + 1, s + 1),
+                    point(r, s + 1),
+                );
+                if r + 1 < rings {
+                    unit.extend([a, b, c]);
+                }
+                if r > 0 {
+                    unit.extend([a, c, d]);
+                }
+            }
+        }
+        unit
+    });
+    let sphere = mesh.center.extend(mesh.radius).to_array();
+    let color = mesh.color.to_array();
+    vertices.extend(normals.iter().map(|normal| Vertex {
+        position: (mesh.center + mesh.radius * normal).to_array(),
+        normal: normal.to_array(),
+        color,
+        material: mesh.material,
+        sphere,
+    }));
 }
 
 fn dynamic_buffer(
@@ -549,6 +698,54 @@ fn load_hdr(device: &ID3D11Device, path: &Path) -> Result<ID3D11ShaderResourceVi
         device.CreateShaderResourceView(&texture, None, Some(&mut output))?;
     }
     Ok(output.unwrap())
+}
+
+fn load_material_map(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    path: &Path,
+    albedo: bool,
+) -> Result<ID3D11ShaderResourceView> {
+    let image = image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()?;
+    let (format, bytes_per_pixel, pixels) = if albedo {
+        (
+            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+            4,
+            image.to_rgba8().into_raw(),
+        )
+    } else {
+        (DXGI_FORMAT_R8_UNORM, 1, image.to_luma8().into_raw())
+    };
+    let desc = D3D11_TEXTURE2D_DESC {
+        MipLevels: 0,
+        MiscFlags: D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32,
+        ..texture_desc(
+            image.width(),
+            image.height(),
+            format,
+            D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+        )
+    };
+    let texture = texture(device, desc, None)?;
+    let mut view = None;
+    unsafe {
+        device.CreateShaderResourceView(&texture, None, Some(&mut view))?;
+        context.UpdateSubresource(
+            &texture,
+            0,
+            None,
+            pixels.as_ptr().cast(),
+            image.width() * bytes_per_pixel,
+            0,
+        );
+    }
+    let view = view.unwrap();
+    unsafe {
+        context.GenerateMips(&view);
+    }
+    Ok(view)
 }
 
 fn compile(source: &str, entry: PCSTR, model: PCSTR) -> Result<Vec<u8>> {

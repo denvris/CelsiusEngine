@@ -2,7 +2,7 @@
 
 Celsius Engine is a modular PCVR engine prototype for 64-bit Windows. Rust and OpenXR handle the headset session, hand and body tracking, locomotion, and stereo rendering. Lua 5.4 defines gameplay, objects, and interactions. The included Baseplate demo lets you walk in place without joysticks and trigger a beacon by pinching your thumb and index finger.
 
-Version 0.1 has been tested with simulated input and the Direct3D 11 renderer. Quest 3S is the first hardware target via Meta Horizon Link. Live headset tracking and frame timing are pending validation.
+The current build has been tested with simulated input and the Direct3D 11 renderer. Quest 3S is the first hardware target via Meta Horizon Link. Live headset tracking and frame timing are pending validation.
 
 ## Run the baseplate
 
@@ -63,7 +63,32 @@ The raster renderer draws the Lua scene and avatar into separate per-eye sRGB sw
 - `--hdr path/to/sky.hdr` loads a linear equirectangular Radiance HDR image for the sky and directional environmental color. The current ambient term samples the panorama directly.
 - `--shader path/to/surface.hlsl` replaces the default surface function. Start from [default_surface.hlsl](src/graphics/default_surface.hlsl). Supply `float3 shade_surface(Surface s)` and return a linear color. `s` exposes world position, normal, vertex color, and the Lua material identifier. Shader code also has access to the current eye's camera and view/projection matrices, `environment(ray)`, and `sunlight_visibility(world, normal)`. The engine applies exposure-independent tone mapping and handles stereo submission.
 
-The currently supported geometry is boxes and segments. The current lighting and shadows are a prototype and the cloud cost has not been measured in a headset. Asset import, production PBR, and native Quest packaging remain future work.
+The currently supported geometry is boxes, segments and spheres. General mesh import, production PBR, and native Quest packaging remain future work.
+
+## Reflection Lab
+
+`Probar-Reflejos.cmd` opens a second PCVR test alongside the original Baseplate launcher. Six spheres show chrome, brushed metal, solid glass, glazed ceramic, varnished wood, and concrete. The high-contrast panel has five progressively finer line groups, and a second panel behind the starting viewpoint makes scene reflections easy to distinguish from sky reflections. The glass sphere uses a refractive index of 1.50, separate entry and exit refraction, Fresnel reflectance, and thickness-based absorption.
+
+```powershell
+# Optional 4K materials and photographed HDR sky. Run once from the repository root.
+.\examples\download-reflection-assets.ps1
+
+# Compare the same scene with scene ray queries on and off.
+cargo run --locked --release --example baseplate -- --lab --preview target/reflections-on.png
+cargo run --locked --release --example baseplate -- --lab --raytracing off --preview target/reflections-off.png
+
+# In Quest Link, start with the lab default. Lower the per-eye scale to compare performance.
+.\GameTest\Probar-Reflejos.cmd --scale 0.65
+.\GameTest\Probar-Reflejos.cmd --scale 0.65 --raytracing off
+```
+
+The downloader fetches the color and roughness maps for [Concrete Floor](https://polyhaven.com/a/concrete_floor) and [Wood Table 001](https://polyhaven.com/a/wood_table_001), plus the photographed [Kloppenheim 05 Pure Sky](https://polyhaven.com/a/kloppenheim_05_puresky), all from [Poly Haven under CC0](https://polyhaven.com/license). The lab uses procedural materials and sky if those files are missing. Albedo uses sRGB sampling, roughness uses a linear single-channel texture, and both use mipmaps and anisotropic filtering. The HDRI supplies the sky and reflected radiance. Volumetric clouds are sampled in the reflected and transmitted sky as well as in the main sky view.
+
+### Enable ray tracing in a game
+
+Set `ray_tracing = true` in the Lua game table and use a surface shader that calls `trace_radiance(origin, direction)` with a normalized direction. The default raster shader does not call it. `--raytracing on|off` overrides the demo's Lua setting. With the flag off, the helper samples the environment and skips all scene intersections. See [reflection_lab.lua](examples/reflection_lab.lua) and [reflection_lab.hlsl](examples/reflection_lab.hlsl).
+
+Primary visibility is rasterized for both modes. The D3D11 pixel shader uses analytic GPU intersections through Shader Model 5 on supported AMD and NVIDIA cards. It supports up to 32 world-space spheres and axis-aligned scene boxes and a 35 m ray range. Secondary hits use approximate shading. The lab issues rays only for selected materials, with one scene query for chrome or ceramic and up to two for glass or brushed metal. Avatar geometry and rotated boxes are excluded from secondary rays. There is no DXR acceleration, recursive path tracing, or temporal accumulation. Headset frame rate and behavior across GPU vendors have yet to be measured.
 
 The original smoke examples remain available with `cargo run --locked --example progression` and `cargo run --locked --example vr_input`.
 
@@ -75,6 +100,8 @@ The original smoke examples remain available with `cargo run --locked --example 
 | [src/scripting](src/scripting) | Lua scene and object bindings |
 | [src/graphics](src/graphics) | D3D11 rendering, environment lighting and HLSL shaders |
 | [examples](examples) | Baseplate demo, game test launcher and examples |
+
+Update this README in the same change whenever build steps, public APIs, supported features, or demo controls change.
 
 ## References
 

@@ -52,5 +52,17 @@ impl BoxMesh {
 #[derive(Default)]
 pub struct Scene {
     pub boxes: Vec<BoxMesh>,
+    pub spheres: Vec<SphereMesh>,
     pub cloud_density: f32,
+    /// Enable GPU scene intersections for materials that call the reflection API.
+    pub ray_tracing: bool,
+    /// Number of leading scene boxes to include in ray queries.
+    pub traced_boxes: usize,
+}
+
+pub struct SphereMesh {
+    pub center: Vec3,
+    pub radius: f32,
+    pub color: Vec3,
+    pub material: f32,
 }

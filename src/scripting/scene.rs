@@ -3,7 +3,7 @@ use std::time::Duration;
 use glam::{Quat, Vec3};
 use mlua::{Error, Function, Result, Table};
 
-use crate::graphics::{BoxMesh, Scene};
+use crate::graphics::{BoxMesh, Scene, SphereMesh};
 use crate::vr::{HAND_BONES, PlayerTracking, TrackingFrame, VrCallbacks};
 
 use super::ScriptRuntime;
@@ -53,18 +53,33 @@ impl LuaScene {
         }
         let objects: Table = self.module.raw_get("objects")?;
         let mut scene = Scene {
-            boxes: Vec::new(),
             cloud_density: number(&self.module, "cloud_density", 0.0, 0.0, 2.0)?,
+            ray_tracing: self
+                .module
+                .raw_get::<Option<bool>>("ray_tracing")?
+                .unwrap_or(false),
+            ..Default::default()
         };
         for object in objects.sequence_values::<Table>() {
             let object = object?;
             let center = vector(&object, "position")?;
-            let size = vector(&object, "size")?;
             let color = vector(&object, "color")?;
-            if size.min_element() <= 0.0 || color.min_element() < 0.0 {
-                return Err(Error::runtime(
-                    "Object size must be positive and color must be nonnegative",
-                ));
+            if color.min_element() < 0.0 {
+                return Err(Error::runtime("Object color must be nonnegative"));
+            }
+            let material = number(&object, "material", 0.0, -100.0, 100.0)?;
+            if object.raw_get::<Option<String>>("shape")?.as_deref() == Some("sphere") {
+                scene.spheres.push(SphereMesh {
+                    center,
+                    radius: number(&object, "radius", 0.5, 0.001, 100.0)?,
+                    color,
+                    material,
+                });
+                continue;
+            }
+            let size = vector(&object, "size")?;
+            if size.min_element() <= 0.0 {
+                return Err(Error::runtime("Object size must be positive"));
             }
             let angle = number(&object, "yaw", 0.0, -10.0, 10.0)?;
             scene.boxes.push(BoxMesh {
@@ -72,9 +87,10 @@ impl LuaScene {
                 size,
                 color,
                 orientation: Quat::from_rotation_y(angle),
-                material: number(&object, "material", 0.0, -100.0, 100.0)?,
+                material,
             });
         }
+        scene.traced_boxes = scene.boxes.len();
         self.append_avatar(&mut scene, frame, show_head);
         Ok((scene, offset))
     }

@@ -134,3 +134,25 @@ fn avatar_uses_available_leg_poses_independently() {
     );
     assert!((avatar.legs[1][2].y - 0.07).abs() < 1e-5);
 }
+
+#[test]
+fn reflection_lab_keeps_geometry_when_ray_tracing_is_disabled() -> mlua::Result<()> {
+    let scripts = ScriptRuntime::new()?;
+    let mut lab = LuaScene::load(
+        &scripts,
+        "@reflection_lab.lua",
+        include_str!("../examples/reflection_lab.lua"),
+    )?;
+    let frame = TrackingFrame::default();
+    let (enabled, _) = lab.tick(&frame, Duration::ZERO, false, false)?;
+    assert!(enabled.ray_tracing);
+    assert_eq!(enabled.spheres.len(), 6);
+    assert_eq!(enabled.traced_boxes, enabled.boxes.len());
+    lab.module().raw_set("ray_tracing", false)?;
+    let (disabled, _) = lab.tick(&frame, Duration::ZERO, false, false)?;
+    assert!(!disabled.ray_tracing);
+    assert_eq!(disabled.spheres.len(), enabled.spheres.len());
+    assert_eq!(disabled.boxes.len(), enabled.boxes.len());
+    assert_eq!(disabled.cloud_density, enabled.cloud_density);
+    Ok(())
+}

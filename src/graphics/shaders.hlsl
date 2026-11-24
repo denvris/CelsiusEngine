@@ -4,6 +4,7 @@ cbuffer Eye : register(b0) {
     float4x4 light_view_projection;
     float4 camera;
     float4 settings;
+    float4 material_maps;
 };
 
 Texture2D<float4> environment_map : register(t0);
@@ -43,19 +44,18 @@ float noise(float3 p) {
     return lerp(lerp(a, b, f.y), lerp(c, d, f.y), f.z);
 }
 
-float3 clouds(float3 ray, float3 sky) {
+float3 clouds_at(float3 origin, float3 ray, float3 sky, int steps) {
     if (ray.y <= 0.035 || settings.y <= 0) return sky;
     const float floor_height = 24;
     const float ceiling_height = 40;
-    float start = max((floor_height - camera.y) / ray.y, 0);
-    float end = min((ceiling_height - camera.y) / ray.y, 280);
+    float start = max((floor_height - origin.y) / ray.y, 0);
+    float end = min((ceiling_height - origin.y) / ray.y, 280);
     if (start >= end) return sky;
-    const int steps = 12;
     float stride = (end - start) / steps;
     float transmittance = 1;
     float3 light = 0;
     [loop] for (int i = 0; i < steps && transmittance > 0.025; ++i) {
-        float3 p = camera.xyz + ray * (start + (i + 0.5) * stride);
+        float3 p = origin + ray * (start + (i + 0.5) * stride);
         float height = saturate((p.y - floor_height) / (ceiling_height - floor_height));
         float profile = smoothstep(0, 0.25, height) * (1 - smoothstep(0.67, 1, height));
         float3 q = p * 0.085;
@@ -83,7 +83,7 @@ SkyVertex sky_vs(uint id : SV_VertexID) {
 float4 sky_ps(SkyVertex i) : SV_Target {
     float4 world = mul(inverse_view_projection, float4(i.clip, 1, 1));
     float3 ray = normalize(world.xyz / world.w - camera.xyz);
-    return float4(tonemap(clouds(ray, environment(ray))), 1);
+    return float4(tonemap(clouds_at(camera.xyz, ray, environment(ray), 12)), 1);
 }
 
 struct Vertex {
@@ -91,6 +91,7 @@ struct Vertex {
     float3 normal : NORMAL;
     float3 color : COLOR;
     float material : TEXCOORD0;
+    float4 sphere : TEXCOORD1;
 };
 
 struct Surface {
@@ -99,6 +100,7 @@ struct Surface {
     float3 normal : TEXCOORD1;
     float3 color : COLOR;
     nointerpolation float material : TEXCOORD2;
+    nointerpolation float4 sphere : TEXCOORD3;
 };
 
 Surface mesh_vs(Vertex v) {
@@ -108,6 +110,7 @@ Surface mesh_vs(Vertex v) {
     o.normal = v.normal;
     o.color = v.color;
     o.material = v.material;
+    o.sphere = v.sphere;
     return o;
 }
 

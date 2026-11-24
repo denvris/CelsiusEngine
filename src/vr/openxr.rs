@@ -84,6 +84,21 @@ pub fn run(
     surface: &str,
     hdri: Option<&Path>,
     render_scale: f32,
+    scene: impl FnMut(Frame) -> Result<(Scene, Vec3)>,
+) -> Result<()> {
+    run_with_renderer(
+        loader,
+        render_scale,
+        |device| Renderer::new(device, surface, hdri),
+        scene,
+    )
+}
+
+/// Allows an application to select the render pipeline while retaining the OpenXR frame loop.
+pub fn run_with_renderer(
+    loader: Option<&Path>,
+    render_scale: f32,
+    renderer: impl FnOnce(ID3D11Device) -> Result<Renderer>,
     mut scene: impl FnMut(Frame) -> Result<(Scene, Vec3)>,
 ) -> Result<()> {
     if !render_scale.is_finite() || !(0.4..=1.0).contains(&render_scale) {
@@ -100,7 +115,7 @@ pub fn run(
     )?;
     let device = d3d11::create_device(Some((requirements.luid, requirements.feature_level)))?;
     let session = runtime.session(&device)?;
-    let mut renderer = Renderer::new(device, surface, hdri)?;
+    let mut renderer = renderer(device)?;
     let view_space = reference_space(api, session.raw, VIEW_SPACE)?;
     let (world_space, local_floor) = match try_space(api, session.raw, STAGE_SPACE) {
         (SPACE_UNSUPPORTED, _) => (reference_space(api, session.raw, LOCAL_SPACE)?, true),
