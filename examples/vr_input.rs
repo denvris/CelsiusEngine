@@ -19,8 +19,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     callbacks.hand_gesture("pinch", Hand::Right)?;
 
     let mut detector = HeadBobDetector::new(1.7).expect("finite calibration height");
-    for (height, elapsed_ms) in [(1.7, 0), (1.66, 120), (1.74, 160)] {
-        if detector.update(Some(height), Duration::from_millis(elapsed_ms)) {
+    for i in 0..80 {
+        let height = 1.7 + 0.01 * (i as f32 * 0.015 * std::f32::consts::TAU * 2.6).sin();
+        if detector.update(Some(height), Duration::from_millis(15)) {
             callbacks.locomotion_step()?;
         }
     }

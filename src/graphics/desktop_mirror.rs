@@ -48,8 +48,19 @@ impl MirrorWindow {
             module,
         };
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let scale = (1120.0 / f64::from(width))
-            .min(760.0 / f64::from(height))
+        let mut work_area = RECT::default();
+        unsafe {
+            SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(std::ptr::from_mut(&mut work_area).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )?;
+        }
+        let available_width = (work_area.right - work_area.left - 40).max(320);
+        let available_height = (work_area.bottom - work_area.top - 80).max(240);
+        let scale = (f64::from(available_width) / f64::from(width))
+            .min(f64::from(available_height) / f64::from(height))
             .min(1.0);
         let mut rect = RECT {
             right: (f64::from(width) * scale).round() as i32,

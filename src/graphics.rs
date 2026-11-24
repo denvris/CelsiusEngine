@@ -56,10 +56,13 @@ pub struct Scene {
     pub boxes: Vec<BoxMesh>,
     pub spheres: Vec<SphereMesh>,
     pub cloud_density: f32,
+    pub volumetric_density: f32,
     /// Enable GPU scene intersections for materials that call the reflection API.
     pub ray_tracing: bool,
     /// Number of leading scene boxes to include in ray queries.
     pub traced_boxes: usize,
+    /// Extra boxes, addressed by index, that participate in reflection rays.
+    pub ray_avatar_boxes: Vec<usize>,
 }
 
 pub struct SphereMesh {

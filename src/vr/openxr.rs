@@ -134,8 +134,8 @@ pub fn run_session(
     renderer: impl FnOnce(ID3D11Device) -> Result<Renderer>,
     mut scene: impl FnMut(Frame) -> Result<(Scene, Vec3)>,
 ) -> Result<()> {
-    if !render_scale.is_finite() || !(0.4..=1.0).contains(&render_scale) {
-        return Err("Render scale must be between 0.4 and 1.0".into());
+    if !render_scale.is_finite() || !(0.4..=1.25).contains(&render_scale) {
+        return Err("Render scale must be between 0.4 and 1.25".into());
     }
     let runtime = Runtime::connect(loader)?;
     eprintln!(
@@ -657,8 +657,12 @@ impl EyeTarget {
         format: i64,
         scale: f32,
     ) -> Result<Self> {
+        let scale = scale
+            .min(config.max_width as f32 / config.width as f32)
+            .min(config.max_height as f32 / config.height as f32);
         let width = ((config.width as f32 * scale).round() as u32).max(1);
         let height = ((config.height as f32 * scale).round() as u32).max(1);
+        eprintln!("OpenXR: eye swapchain {width}x{height}.");
         let info = SwapchainInfo {
             usage: COLOR_ATTACHMENT,
             format,

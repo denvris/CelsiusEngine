@@ -2,9 +2,10 @@ local lab = {
     objects = {},
     ray_tracing = true,
     cloud_density = 0.72,
+    volumetric_density = 0.026,
     step_speed = 2.2,
     movement_limit = 8.0,
-    hands_only = true,
+    trace_avatar = true,
 }
 
 local function box(position, size, color, material)
@@ -24,6 +25,17 @@ box({4.4, 1.46, -0.5}, {0.18, 2.9, 0.28}, {1.0, 0.15, 0.045}, 2)
 box({0, 1.67, 3.25}, {7.5, 1.25, 0.11}, {1.0, 0.79, 0.42}, 20)
 box({-1.67, 2.7, 2.75}, {1.60, 0.23, 0.14}, {0.52, 0.83, 1.0}, 2)
 box({1.67, 2.7, 2.75}, {1.60, 0.23, 0.14}, {1.0, 0.81, 0.48}, 2)
+
+-- Moves behind the starting view so its motion can be seen directly in the chrome reflection.
+local marker = {shape = "sphere", position = {-3.1, 1.64, 2.2}, radius = 0.26,
+                color = {0.14, 1.0, 0.24}, material = 2}
+local time = 0
+table.insert(lab.objects, marker)
+
+function lab.on_frame(dt)
+    time = time + dt
+    marker.position[1] = -3.1 + 1.4 * math.sin(time * 1.7)
+end
 
 local finishes = {
     {10, {0.89, 0.94, 1.0}},   -- Chrome

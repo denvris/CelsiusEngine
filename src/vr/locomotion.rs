@@ -1,67 +1,88 @@
 use std::time::Duration;
 
-const BOB_THRESHOLD_METERS: f32 = 0.025;
-const NEUTRAL_BAND_METERS: f32 = 0.01;
-const MIN_RISE_TIME: Duration = Duration::from_millis(90);
-const MAX_RISE_TIME: Duration = Duration::from_millis(600);
+const SMOOTH_SECONDS: f32 = 0.028;
+const REVERSAL_METERS: f32 = 0.0025;
+const BOB_METERS: std::ops::RangeInclusive<f32> = 0.011..=0.10;
+const RISE_SECONDS: std::ops::RangeInclusive<f32> = 0.06..=0.42;
+const STEP_SECONDS: std::ops::RangeInclusive<f32> = 0.20..=0.72;
 
-enum Phase {
-    Ready,
-    Away { side: f32, age: Duration },
-    WaitForNeutral,
+#[derive(Clone, Copy)]
+struct Sample {
+    height: f32,
+    time: f32,
 }
 
-/// Emits a step signal from tracking-space head height relative to a calibrated neutral pose.
+/// Detects successive vertical bobs by their amplitude and cadence.
 pub struct HeadBobDetector {
-    neutral_height: f32,
-    phase: Phase,
+    filtered: Option<Sample>,
+    extreme: Sample,
+    trough: Option<Sample>,
+    last_peak: Option<f32>,
+    step_interval: Option<f32>,
 }
 
 impl HeadBobDetector {
-    pub fn new(neutral_height: f32) -> Option<Self> {
-        neutral_height.is_finite().then_some(Self {
-            neutral_height,
-            phase: Phase::WaitForNeutral,
+    pub fn new(height: f32) -> Option<Self> {
+        let sample = Sample { height, time: 0.0 };
+        height.is_finite().then_some(Self {
+            filtered: Some(sample),
+            extreme: sample,
+            trough: None,
+            last_peak: None,
+            step_interval: None,
         })
     }
 
-    /// Pass `None` when head position is unavailable. A step signal leaves movement policy to the caller.
-    pub fn update(&mut self, height_meters: Option<f32>, elapsed: Duration) -> bool {
-        let Some(offset) = height_meters
-            .map(|height| height - self.neutral_height)
-            .filter(|offset| offset.is_finite())
-        else {
-            self.phase = Phase::WaitForNeutral;
+    /// Pass `None` when the headset pose is lost. A fresh cadence is required after reacquisition.
+    pub fn update(&mut self, height: Option<f32>, elapsed: Duration) -> bool {
+        self.step_interval = None;
+        let Some(height) = height.filter(|height| height.is_finite()) else {
+            self.filtered = None;
+            self.trough = None;
+            self.last_peak = None;
             return false;
         };
+        let dt = elapsed.as_secs_f32();
+        let Some(previous) = self.filtered.filter(|_| dt <= 0.10) else {
+            *self = Self::new(height).expect("finite tracking height");
+            return false;
+        };
+        let sample = Sample {
+            height: previous.height
+                + (height - previous.height) * (1.0 - (-dt / SMOOTH_SECONDS).exp()),
+            time: previous.time + dt,
+        };
+        self.filtered = Some(sample);
 
-        match self.phase {
-            Phase::WaitForNeutral if offset.abs() <= NEUTRAL_BAND_METERS => {
-                self.phase = Phase::Ready;
-            }
-            Phase::Ready if offset.abs() >= BOB_THRESHOLD_METERS => {
-                self.phase = Phase::Away {
-                    side: offset.signum(),
-                    age: Duration::ZERO,
-                };
-            }
-            Phase::Away { side, age } => {
-                let age = age.saturating_add(elapsed);
-                if age > MAX_RISE_TIME {
-                    self.phase = Phase::WaitForNeutral;
-                } else if offset * side <= NEUTRAL_BAND_METERS {
-                    self.phase = if offset.abs() <= NEUTRAL_BAND_METERS {
-                        Phase::Ready
-                    } else {
-                        Phase::WaitForNeutral
-                    };
-                    return age >= MIN_RISE_TIME;
-                } else {
-                    self.phase = Phase::Away { side, age };
+        if let Some(trough) = self.trough {
+            if sample.height >= self.extreme.height {
+                self.extreme = sample;
+            } else if self.extreme.height - sample.height >= REVERSAL_METERS {
+                let peak = self.extreme;
+                self.extreme = sample;
+                self.trough = None;
+                if BOB_METERS.contains(&(peak.height - trough.height))
+                    && RISE_SECONDS.contains(&(peak.time - trough.time))
+                {
+                    self.step_interval = self
+                        .last_peak
+                        .replace(peak.time)
+                        .map(|last| peak.time - last)
+                        .filter(|interval| STEP_SECONDS.contains(interval));
+                    return self.step_interval.is_some();
                 }
+                self.last_peak = None;
             }
-            _ => {}
+        } else if sample.height <= self.extreme.height {
+            self.extreme = sample;
+        } else if sample.height - self.extreme.height >= REVERSAL_METERS {
+            self.trough = Some(self.extreme);
+            self.extreme = sample;
         }
         false
+    }
+
+    pub fn step_interval_seconds(&self) -> Option<f32> {
+        self.step_interval
     }
 }

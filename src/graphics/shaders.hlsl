@@ -5,6 +5,7 @@ cbuffer Eye : register(b0) {
     float4 camera;
     float4 settings;
     float4 material_maps;
+    float4 volume;
 };
 
 Texture2D<float4> environment_map : register(t0);
@@ -73,6 +74,34 @@ struct SkyVertex {
     float2 clip : TEXCOORD0;
 };
 
+float sunlight_visibility(float3 world, float3 normal);
+
+float3 apply_volumetric_shadows(float3 origin, float3 ray, float distance_to_surface, float3 background) {
+    [branch] if (volume.x <= 0) return background;
+    const int steps = 8;
+    const float height_limit = 4.0;
+    float end = min(distance_to_surface, 22.0);
+    if (ray.y > 0.001) end = min(end, (height_limit - origin.y) / ray.y);
+    if (ray.y < -0.001) end = min(end, -origin.y / ray.y);
+    float start = origin.y > height_limit && ray.y < -0.001 ? (height_limit - origin.y) / ray.y : 0;
+    if (end <= start || (origin.y > height_limit && ray.y >= -0.001)) return background;
+    float stride = (end - start) / steps;
+    float transmittance = 1.0;
+    float3 scattering = 0;
+    float phase = 0.30 + 0.70 * pow(saturate(dot(ray, sun)), 4.0);
+    [unroll] for (int i = 0; i < steps; ++i) {
+        float3 p = origin + ray * (start + (i + 0.5) * stride);
+        float density = volume.x * (1.0 - smoothstep(0.0, height_limit, max(0.0, p.y)));
+        float opacity = 1.0 - exp(-density * stride);
+        float visibility = sunlight_visibility(p, 0);
+        float3 radiance = float3(0.06, 0.09, 0.14)
+            + visibility * phase * float3(1.25, 1.05, 0.84);
+        scattering += transmittance * opacity * radiance;
+        transmittance *= 1.0 - opacity;
+    }
+    return background * transmittance + scattering;
+}
+
 SkyVertex sky_vs(uint id : SV_VertexID) {
     SkyVertex o;
     o.clip = float2(id == 2 ? 3 : -1, id == 1 ? 3 : -1);
@@ -83,7 +112,8 @@ SkyVertex sky_vs(uint id : SV_VertexID) {
 float4 sky_ps(SkyVertex i) : SV_Target {
     float4 world = mul(inverse_view_projection, float4(i.clip, 1, 1));
     float3 ray = normalize(world.xyz / world.w - camera.xyz);
-    return float4(tonemap(clouds_at(camera.xyz, ray, environment(ray), 12)), 1);
+    float3 sky = clouds_at(camera.xyz, ray, environment(ray), 12);
+    return float4(tonemap(apply_volumetric_shadows(camera.xyz, ray, 22, sky)), 1);
 }
 
 struct Vertex {
@@ -124,5 +154,9 @@ float sunlight_visibility(float3 world, float3 normal) {
 }
 
 float4 mesh_ps(Surface surface) : SV_Target {
-    return float4(tonemap(shade_surface(surface)), 1);
+    float3 to_surface = surface.world - camera.xyz;
+    float distance_to_surface = length(to_surface);
+    float3 ray = to_surface / max(distance_to_surface, 1e-5);
+    return float4(tonemap(apply_volumetric_shadows(
+        camera.xyz, ray, distance_to_surface, shade_surface(surface))), 1);
 }

@@ -70,9 +70,10 @@ struct Eye {
     camera: [f32; 4],
     settings: [f32; 4],
     material_maps: [f32; 4],
+    volume: [f32; 4],
 }
 
-const MAX_RAY_OBJECTS: usize = 32;
+const MAX_RAY_OBJECTS: usize = 48;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -80,6 +81,7 @@ struct RayObject {
     center_radius: [f32; 4],
     extent_material: [f32; 4],
     color: [f32; 4],
+    rotation: [f32; 4],
 }
 
 const MATERIAL_MAPS: [&str; 4] = [
@@ -98,6 +100,7 @@ pub struct Renderer {
     mesh_ps: ID3D11PixelShader,
     layout: ID3D11InputLayout,
     rasterizer: ID3D11RasterizerState,
+    sky_depth: ID3D11DepthStencilState,
     sampler: ID3D11SamplerState,
     shadow: ShadowMap,
     sky: Option<ID3D11ShaderResourceView>,
@@ -105,6 +108,7 @@ pub struct Renderer {
     ray_buffer: ID3D11Buffer,
     ray_count: usize,
     ray_tracing: bool,
+    volumetric_density: f32,
     maps: [Option<ID3D11ShaderResourceView>; 4],
     material_sampler: ID3D11SamplerState,
     vertex_buffer: ID3D11Buffer,
@@ -229,11 +233,21 @@ impl Renderer {
             MaxLOD: f32::MAX,
             ..Default::default()
         };
-        let (mut rasterizer_state, mut sampler_state, mut material_sampler) = (None, None, None);
+        let (mut rasterizer_state, mut sampler_state, mut material_sampler, mut sky_depth) =
+            (None, None, None, None);
         let context = unsafe { device.GetImmediateContext()? };
         unsafe {
             device.CreateInputLayout(&elements, &mesh_vs, Some(&mut layout))?;
             device.CreateRasterizerState(&rasterizer, Some(&mut rasterizer_state))?;
+            device.CreateDepthStencilState(
+                &D3D11_DEPTH_STENCIL_DESC {
+                    DepthEnable: true.into(),
+                    DepthWriteMask: D3D11_DEPTH_WRITE_MASK_ZERO,
+                    DepthFunc: D3D11_COMPARISON_LESS_EQUAL,
+                    ..Default::default()
+                },
+                Some(&mut sky_depth),
+            )?;
             device.CreateSamplerState(&sampler, Some(&mut sampler_state))?;
             device.CreateSamplerState(
                 &D3D11_SAMPLER_DESC {
@@ -254,6 +268,7 @@ impl Renderer {
             mesh_ps: pixel_shader(&device, &mesh_ps)?,
             layout: layout.unwrap(),
             rasterizer: rasterizer_state.unwrap(),
+            sky_depth: sky_depth.unwrap(),
             sampler: sampler_state.unwrap(),
             shadow: ShadowMap::new(&device)?,
             sky: hdri.map(|path| load_hdr(&device, path)).transpose()?,
@@ -265,6 +280,7 @@ impl Renderer {
             )?,
             ray_count: 0,
             ray_tracing: false,
+            volumetric_density: 0.0,
             maps: Default::default(),
             material_sampler: material_sampler.unwrap(),
             vertex_buffer: dynamic_buffer(
@@ -362,6 +378,7 @@ impl Renderer {
             append_sphere(&mut self.vertices, mesh);
         }
         self.ray_tracing = scene.ray_tracing;
+        self.volumetric_density = scene.volumetric_density;
         if self.ray_tracing {
             self.upload_ray_objects(scene)?;
         } else {
@@ -430,6 +447,7 @@ impl Renderer {
                     .maps
                     .each_ref()
                     .map(|map| u8::from(map.is_some()) as f32),
+                volume: [self.volumetric_density, 0.0, 0.0, 0.0],
             }),
         )?;
         let color = target
@@ -442,16 +460,10 @@ impl Renderer {
             ctx.RSSetViewports(Some(slice::from_ref(&target.viewport)));
             ctx.RSSetState(&self.rasterizer);
             ctx.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            ctx.OMSetRenderTargets(Some(targets), None::<&ID3D11DepthStencilView>);
-            ctx.IASetInputLayout(None::<&ID3D11InputLayout>);
             ctx.VSSetConstantBuffers(0, Some(&[Some(self.eye.clone())]));
             ctx.PSSetConstantBuffers(0, Some(&[Some(self.eye.clone())]));
             ctx.PSSetShaderResources(0, Some(slice::from_ref(&self.sky)));
             ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
-            ctx.VSSetShader(&self.sky_vs, None);
-            ctx.PSSetShader(&self.sky_ps, None);
-            ctx.Draw(3, 0);
-
             ctx.ClearDepthStencilView(&target.depth, D3D11_CLEAR_DEPTH.0, 1.0, 0);
             ctx.OMSetRenderTargets(Some(targets), &target.depth);
             ctx.PSSetShaderResources(1, Some(&[Some(self.shadow.view.clone())]));
@@ -463,6 +475,13 @@ impl Renderer {
             ctx.PSSetSamplers(2, Some(&[Some(self.material_sampler.clone())]));
             ctx.PSSetShader(&self.mesh_ps, None);
             self.draw_mesh();
+            // Leave depth writes disabled for the far-plane sky so covered pixels skip it.
+            ctx.OMSetDepthStencilState(&self.sky_depth, 0);
+            ctx.IASetInputLayout(None::<&ID3D11InputLayout>);
+            ctx.VSSetShader(&self.sky_vs, None);
+            ctx.PSSetShader(&self.sky_ps, None);
+            ctx.Draw(3, 0);
+            ctx.OMSetDepthStencilState(None::<&ID3D11DepthStencilState>, 0);
             ctx.OMSetRenderTargets(None, None::<&ID3D11DepthStencilView>);
             // The XR compositor consumes these images on a separate device/context.
             ctx.Flush();
@@ -475,16 +494,23 @@ impl Renderer {
             center_radius: mesh.center.extend(mesh.radius).to_array(),
             extent_material: Vec3::ZERO.extend(mesh.material).to_array(),
             color: mesh.color.extend(1.0).to_array(),
+            rotation: glam::Quat::IDENTITY.to_array(),
         });
         let boxes = scene
             .boxes
             .iter()
             .take(scene.traced_boxes)
-            .filter(|mesh| mesh.orientation.abs_diff_eq(glam::Quat::IDENTITY, 0.0001))
+            .chain(
+                scene
+                    .ray_avatar_boxes
+                    .iter()
+                    .filter_map(|&i| scene.boxes.get(i)),
+            )
             .map(|mesh| RayObject {
                 center_radius: mesh.center.extend(0.0).to_array(),
                 extent_material: (mesh.size * 0.5).extend(mesh.material).to_array(),
                 color: mesh.color.extend(1.0).to_array(),
+                rotation: mesh.orientation.to_array(),
             });
         let mut objects = [RayObject::zeroed(); MAX_RAY_OBJECTS];
         self.ray_count = 0;

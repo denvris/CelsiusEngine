@@ -54,6 +54,7 @@ impl LuaScene {
         let objects: Table = self.module.raw_get("objects")?;
         let mut scene = Scene {
             cloud_density: number(&self.module, "cloud_density", 0.0, 0.0, 2.0)?,
+            volumetric_density: number(&self.module, "volumetric_density", 0.0, 0.0, 0.5)?,
             ray_tracing: self
                 .module
                 .raw_get::<Option<bool>>("ray_tracing")?
@@ -95,7 +96,12 @@ impl LuaScene {
             .module
             .raw_get::<Option<bool>>("hands_only")?
             .unwrap_or(false);
-        self.append_avatar(&mut scene, frame, show_head, hands_only);
+        let trace_avatar = scene.ray_tracing
+            && self
+                .module
+                .raw_get::<Option<bool>>("trace_avatar")?
+                .unwrap_or(false);
+        self.append_avatar(&mut scene, frame, show_head, hands_only, trace_avatar);
         Ok((scene, offset))
     }
 
@@ -105,6 +111,7 @@ impl LuaScene {
         tracking: &TrackingFrame,
         show_head: bool,
         hands_only: bool,
+        trace_avatar: bool,
     ) {
         let slate = Vec3::new(0.08, 0.15, 0.24);
         let trim = Vec3::new(0.16, 0.24, 0.38);
@@ -137,6 +144,9 @@ impl LuaScene {
                 }
             }
             if let Some(palm) = hand.0[0] {
+                if trace_avatar {
+                    scene.ray_avatar_boxes.push(scene.boxes.len());
+                }
                 scene.boxes.push(BoxMesh {
                     center: palm.position + offset,
                     orientation: palm.orientation,
@@ -195,6 +205,7 @@ impl LuaScene {
                     .extend(BoxMesh::segment(elbow, wrist, 0.062, color * 0.58));
             }
         }
+        let leg_start = scene.boxes.len();
         for [hip, knee, foot] in avatar.legs {
             scene
                 .boxes
@@ -209,6 +220,9 @@ impl LuaScene {
                 color: slate,
                 material: 0.0,
             });
+        }
+        if trace_avatar {
+            scene.ray_avatar_boxes.extend(leg_start..scene.boxes.len());
         }
     }
 }

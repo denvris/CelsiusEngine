@@ -33,11 +33,11 @@ cargo run --locked --release --example baseplate
 
 For Quest 3S, enable hand tracking and the developer runtime features available in the Link app. The probe prints the headset system name and whether the runtime supplies articulated hands and body tracking. The demo can open with head tracking alone when hands are unavailable.
 
-Start upright and hold still while the first valid head pose calibrates height. March in place with a small vertical bounce and return near your starting height on each step. The engine advances horizontally in the direction the headset is facing, and turning your head steers the movement. It eases to a stop when you stop stepping. Thumb-to-index pinches leave colored markers and pulse the beacon. Look down to see the avatar. The headset supplies the head pose and valid hand joints, including fingers. The avatar uses torso and arm joints from `XR_FB_body_tracking` and lower-body joints from `XR_META_body_tracking_full_body` when the runtime supplies them. The runtime may synthesize leg poses. When those joints are unavailable, the engine estimates the pose from the head, hands, and locomotion. `--probe` reports runtime capability for both extensions.
+Walk or jog in place with a small, regular vertical bounce. The engine filters headset height and confirms a cadence from successive peaks and troughs. An isolated crouch does not start movement. It adjusts speed to the pace, follows the headset's horizontal heading, and eases to a stop when the rhythm ends. Thumb-to-index pinches leave colored markers and pulse the beacon. Look down to see the avatar. The headset supplies the head pose and valid hand joints, including fingers. The avatar uses torso and arm joints from `XR_FB_body_tracking` and lower-body joints from `XR_META_body_tracking_full_body` when the runtime supplies them. The runtime may synthesize leg poses. When those joints are unavailable, the engine estimates the pose from the head, hands, and locomotion. `--probe` reports runtime capability for both extensions.
 
 ### Desktop gameplay mirror
 
-OpenXR projects open a Windows window named **Celsius Engine - VR Gameplay** by default. In OBS, add a Window Capture source and select that window. It shows the rendered left eye and preserves the eye's aspect ratio. The desktop uses an asynchronous GPU copy of the existing frame and can skip presentation when its swapchain is busy. Closing the desktop window leaves VR running. Disable it with `--no-mirror` or set `SessionOptions::desktop_mirror` to false when calling `openxr::run_session`.
+OpenXR projects open a Windows window named **Celsius Engine - VR Gameplay** by default. In OBS, add a Window Capture source and select that window. It shows the rendered left eye at the largest size that fits the desktop work area, up to the eye's native render resolution, and preserves the eye's aspect ratio. The desktop uses an asynchronous GPU copy of the existing frame and can skip presentation when its swapchain is busy. Closing the desktop window leaves VR running. Disable it with `--no-mirror` or set `SessionOptions::desktop_mirror` to false when calling `openxr::run_session`.
 
 ### Preview on Windows without a headset
 
@@ -55,14 +55,16 @@ Select a Lua module at launch with `--game path/to/game.lua`, or use [examples/b
 | --- | --- |
 | `on_hand_pose(hand, joints)` | Each frame for both hands. Joints are keyed by name and contain `position` and `orientation` in tracking space, with the orientation quaternion in x, y, z, w order. An empty table clears the hand. |
 | `process_hand_gesture(gesture, hand)` | When a thumb-to-index pinch begins. The current hand pose has already been delivered. Custom gestures can also be detected in Lua from joint positions. |
-| `on_locomotion_step()` | When the headset crosses the down-and-up thresholds in the configured time window. |
+| `on_locomotion_step()` | When the headset completes a bounce in the established walk or jog cadence. |
 | `on_frame(dt, offset)` | After the tracking events. Add the horizontal world offset to tracking positions when placing game objects. |
 
 Set `step_speed` in m/s to tune the initial pulse of motion, or use 0 to disable movement. `movement_limit` sets the world-offset limits around the origin. `cloud_density` controls the sky volume and uses 0 to skip it.
 
 ## Renderer and custom shaders
 
-The raster renderer draws the Lua scene and avatar into separate per-eye sRGB swapchains, with depth testing, a shared sun shadow map, linear lighting, filmic tone mapping, and an optional volumetric cloud layer. `--scale 0.4..1.0` sets the per-eye resolution as a proportion of the recommendations from the runtime. The default is 0.75.
+The raster renderer draws the Lua scene and avatar into separate per-eye sRGB swapchains, with depth testing, a shared sun shadow map, linear lighting, filmic tone mapping, and an optional volumetric cloud layer. The demos default to the runtime's full recommended eye resolution. Use `--scale 0.4..1.25` to trade resolution for performance or request supersampling. The request is capped at the runtime's advertised maximum, and the actual dimensions are printed at startup.
+
+Set `volumetric_density` in Lua to enable low-lying fog. The fog samples the sun shadow map along each view ray, so scene geometry can block the light inside the volume. Reflection Lab enables it by default. Override it with `--fog 0..0.5` to compare. Sun shadows in fog use eight samples per ray and the sky runs only where scene geometry leaves the depth buffer uncovered.
 
 OpenXR swapchain images use an explicit D3D11 render-target view in the selected sRGB format. This supports runtimes that return typeless swapchain textures. The desktop PNG preview exercises the same typed-view creation against a typeless texture.
 
@@ -87,8 +89,11 @@ cargo run --locked --release --example baseplate -- --lab --raytracing off --pre
 cargo run --locked --release --example baseplate -- --walk-preview target/reflections-walk.png
 
 # In Quest Link, start with the lab default. Lower the per-eye scale to compare performance.
+.\GameTest\Probar-Reflejos.cmd
+.\GameTest\Probar-Reflejos.cmd --scale 1.15
 .\GameTest\Probar-Reflejos.cmd --scale 0.65
 .\GameTest\Probar-Reflejos.cmd --scale 0.65 --raytracing off
+.\GameTest\Probar-Reflejos.cmd --fog 0
 ```
 
 The downloader fetches the color and roughness maps for [Concrete Floor](https://polyhaven.com/a/concrete_floor) and [Wood Table 001](https://polyhaven.com/a/wood_table_001), plus the photographed [Kloppenheim 05 Pure Sky](https://polyhaven.com/a/kloppenheim_05_puresky), all from [Poly Haven under CC0](https://polyhaven.com/license). The lab uses procedural materials and sky if those files are missing. Albedo uses sRGB sampling, roughness uses a linear single-channel texture, and both use mipmaps and anisotropic filtering. The HDRI supplies the sky and reflected radiance. Volumetric clouds are sampled in the reflected and transmitted sky as well as in the main sky view.
@@ -97,7 +102,7 @@ The downloader fetches the color and roughness maps for [Concrete Floor](https:/
 
 Set `ray_tracing = true` in the Lua game table and use a surface shader that calls `trace_radiance(origin, direction)` with a normalized direction. The default raster shader does not call it. `--raytracing on|off` overrides the demo's Lua setting. With the flag off, the helper samples the environment and skips all scene intersections. See [reflection_lab.lua](examples/reflection_lab.lua) and [reflection_lab.hlsl](examples/reflection_lab.hlsl).
 
-Primary visibility is rasterized for both modes. The D3D11 pixel shader uses analytic GPU intersections through Shader Model 5 on supported AMD and NVIDIA cards. It supports up to 32 world-space spheres and axis-aligned scene boxes and a 35 m ray range. Secondary hits use approximate shading. The lab issues rays only for selected materials, with one scene query for chrome or ceramic and up to two for glass or brushed metal. Avatar geometry and rotated boxes are excluded from secondary rays. There is no DXR acceleration, recursive path tracing, or temporal accumulation. Headset frame rate and behavior across GPU vendors have yet to be measured.
+Primary visibility is rasterized for both modes. The D3D11 pixel shader recalculates reflections and refraction per eye each rendered frame. The engine uploads up to 48 current sphere and oriented-box transforms within the ray scene, with a 35 m ray limit. Secondary hits use approximate shading. The lab opts into reflecting the avatar's palms and legs with `trace_avatar = true` and animates a green target behind the starting view to make reflection updates visible in chrome. Look down to see the legs move with the stride. The lab casts one scene ray for chrome, ceramic, and varnished wood, and up to two for glass or brushed metal. The renderer uses Shader Model 5 and analytic intersections. Headset frame rate and behavior across GPU vendors have yet to be measured.
 
 The original smoke examples remain available with `cargo run --locked --example progression` and `cargo run --locked --example vr_input`.
 

@@ -58,7 +58,7 @@ float3 shade_surface(Surface s) {
         color = material_maps.z > 0.5 ? wood_color.Sample(material_sampler, uv).rgb : grain;
         roughness = material_maps.w > 0.5 ? wood_roughness.Sample(material_sampler, uv).r : 0.29;
         return lerp(lab_lighting(s, n, view, color, roughness),
-                    ray_sky(origin, reflected) * 0.45, (0.12 + 0.45 * grazing) * (1 - roughness));
+                    trace_radiance(origin, reflected) * 0.45, (0.12 + 0.45 * grazing) * (1 - roughness));
     }
     if (material == 15) {
         float2 uv = s.world.xz * 0.48;

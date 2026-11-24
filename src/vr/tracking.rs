@@ -134,6 +134,8 @@ pub struct Avatar {
 pub struct PlayerTracking {
     pub offset: Vec3,
     speed: f32,
+    stride_time: f32,
+    stride_remaining: f32,
     heading: Vec3,
     gait: f32,
     detector: Option<HeadBobDetector>,
@@ -144,6 +146,7 @@ impl PlayerTracking {
     pub fn reset_reference(&mut self) {
         self.detector = None;
         self.speed = 0.0;
+        self.stride_remaining = 0.0;
         self.heading = Vec3::ZERO;
         self.pinching = [false; 2];
     }
@@ -165,31 +168,33 @@ impl PlayerTracking {
             if self.detector.is_none() {
                 self.detector = HeadBobDetector::new(head.position.y);
             }
-            if self
-                .detector
-                .as_mut()
-                .is_some_and(|detector| detector.update(Some(head.position.y), elapsed))
+            if let Some(detector) = &mut self.detector
+                && detector.update(Some(head.position.y), elapsed)
+                && let Some(interval) = detector.step_interval_seconds()
             {
                 callbacks.locomotion_step()?;
-                self.speed = if self.heading == Vec3::ZERO {
-                    0.0
-                } else {
-                    speed
-                };
+                self.stride_time = interval;
+                self.stride_remaining = (interval * 1.16).clamp(0.25, 0.75);
             }
         } else {
             self.detector = None;
             self.speed = 0.0;
+            self.stride_remaining = 0.0;
             self.heading = Vec3::ZERO;
         }
 
         let dt = elapsed.as_secs_f32().min(0.05);
-        let decay = (-5.0 * dt).exp();
-        let distance = self.speed * (1.0 - decay) / 5.0;
+        let cruise = if self.stride_remaining > 0.0 {
+            speed * (0.42 / self.stride_time).clamp(0.65, 1.35)
+        } else {
+            0.0
+        };
+        self.stride_remaining = (self.stride_remaining - dt).max(0.0);
+        self.speed += (cruise - self.speed) * (1.0 - (-12.0 * dt).exp());
+        let distance = self.speed * dt;
         self.offset =
             (self.offset + self.heading * distance).clamp(Vec3::splat(-limit), Vec3::splat(limit));
         self.gait += distance * 8.0;
-        self.speed *= decay;
 
         for (i, hand) in [Hand::Left, Hand::Right].into_iter().enumerate() {
             let joints = &frame.hands[i].0;

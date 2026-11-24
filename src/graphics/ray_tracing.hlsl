@@ -2,10 +2,11 @@ struct RayObject {
     float4 center_radius; // Positive radius for a sphere, zero for a box.
     float4 extent_material; // Box half extents and the material ID.
     float4 color;
+    float4 rotation; // Local-to-world orientation, in x/y/z/w order.
 };
 
 cbuffer RayScene : register(b1) {
-    RayObject trace_objects[32];
+    RayObject trace_objects[48];
 };
 
 Texture2D<float4> concrete_color : register(t2);
@@ -35,6 +36,16 @@ float box_distance(float3 p, float3 reciprocal, float3 extent) {
     return entry > 0.002 ? entry : exit;
 }
 
+float3 rotate_by_quaternion(float3 v, float4 q) {
+    return v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
+float3 safe_reciprocal(float3 direction) {
+    float3 direction_sign = float3(direction.x < 0 ? -1 : 1,
+        direction.y < 0 ? -1 : 1, direction.z < 0 ? -1 : 1);
+    return direction_sign / max(abs(direction), 1e-6);
+}
+
 float3 ray_sky(float3 origin, float3 ray) {
     return clouds_at(origin, ray, environment(ray), 6);
 }
@@ -59,15 +70,24 @@ float3 diagnostic_color(float3 p, float3 tint, float material, float footprint) 
 // Shader API. Each call traces at most one bounded scene ray. Misses use HDRI and clouds.
 float3 trace_radiance(float3 origin, float3 ray) {
     [branch] if (settings.z < 0.5) return ray_sky(origin, ray);
-    float3 direction_sign = float3(ray.x < 0 ? -1 : 1, ray.y < 0 ? -1 : 1, ray.z < 0 ? -1 : 1);
-    float3 reciprocal = direction_sign / max(abs(ray), 1e-6);
+    float3 reciprocal = safe_reciprocal(ray);
     float closest = 35;
     int hit_id = -1;
     [loop] for (int i = 0; i < (int)settings.w; ++i) {
         RayObject obj = trace_objects[i];
-        float distance_hit = obj.center_radius.w > 0
-            ? sphere_distance(origin, ray, obj.center_radius)
-            : box_distance(origin - obj.center_radius.xyz, reciprocal, obj.extent_material.xyz);
+        float distance_hit;
+        if (obj.center_radius.w > 0) {
+            distance_hit = sphere_distance(origin, ray, obj.center_radius);
+        } else {
+            float3 local_origin = origin - obj.center_radius.xyz;
+            float3 local_reciprocal = reciprocal;
+            if (dot(obj.rotation.xyz, obj.rotation.xyz) > 1e-8) {
+                float4 inverse = float4(-obj.rotation.xyz, obj.rotation.w);
+                local_origin = rotate_by_quaternion(local_origin, inverse);
+                local_reciprocal = safe_reciprocal(rotate_by_quaternion(ray, inverse));
+            }
+            distance_hit = box_distance(local_origin, local_reciprocal, obj.extent_material.xyz);
+        }
         if (distance_hit > 0.002 && distance_hit < closest) {
             closest = distance_hit;
             hit_id = i;
@@ -83,9 +103,11 @@ float3 trace_radiance(float3 origin, float3 ray) {
     float3 local = hit_position - hit.center_radius.xyz;
     float3 normal = normalize(local);
     if (hit.center_radius.w <= 0) {
+        local = rotate_by_quaternion(local, float4(-hit.rotation.xyz, hit.rotation.w));
         float3 relative = abs(local) / max(hit.extent_material.xyz, 0.0001);
         normal = relative.x >= max(relative.y, relative.z) ? float3(sign(local.x), 0, 0)
             : (relative.y >= relative.z ? float3(0, sign(local.y), 0) : float3(0, 0, sign(local.z)));
+        normal = rotate_by_quaternion(normal, hit.rotation);
     }
     return tint * (0.36 + 0.55 * saturate(dot(normal, sun)));
 }

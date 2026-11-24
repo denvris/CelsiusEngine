@@ -7,29 +7,29 @@ use celsius_engine::vr::{
 };
 use glam::{Quat, Vec3};
 
+fn jog_height(frame: u32, baseline: f32) -> f32 {
+    baseline + 0.009 * (frame as f32 * 0.01 * std::f32::consts::TAU * 2.6).sin()
+}
+
 #[test]
-fn step_requires_a_fresh_down_and_up_cycle() {
+fn cadence_detects_shallow_bobs_without_triggering_on_a_crouch() {
+    let tick = Duration::from_millis(10);
     let mut detector = HeadBobDetector::new(1.7).unwrap();
-    let tick = Duration::from_millis(140);
-
-    assert!(!detector.update(Some(1.7), tick));
-    assert!(!detector.update(Some(1.66), tick));
-    assert!(!detector.update(Some(1.74), Duration::from_millis(10)));
-
-    assert!(!detector.update(Some(1.7), tick));
-    assert!(!detector.update(Some(1.66), tick));
+    let crouch = (0..110).map(|i| 1.7 - 0.25 * (i as f32 / 110.0 * std::f32::consts::PI).sin());
+    for height in crouch {
+        assert!(!detector.update(Some(height), tick));
+    }
+    for i in 0..300 {
+        assert!(!detector.update(Some(1.70 + 0.001 * (i as f32).sin()), tick));
+    }
+    let steps = (0..160)
+        .filter(|&i| detector.update(Some(jog_height(i, 1.68)), tick))
+        .count();
+    assert!(steps >= 2, "Detected {steps} shallow steps");
     assert!(!detector.update(None, tick));
-    assert!(!detector.update(Some(1.74), tick));
-
-    assert!(!detector.update(Some(1.7), tick));
-    assert!(!detector.update(Some(1.66), tick));
-    assert!(!detector.update(Some(1.66), Duration::from_secs(1)));
-    assert!(!detector.update(Some(1.74), tick));
-
-    assert!(!detector.update(Some(1.7), tick));
-    assert!(!detector.update(Some(1.66), tick));
-    assert!(detector.update(Some(1.74), tick));
-    assert!(!detector.update(Some(1.74), tick));
+    for i in 0..49 {
+        assert!(!detector.update(Some(jog_height(i, 1.68)), tick));
+    }
 }
 
 #[test]
@@ -72,15 +72,15 @@ fn baseplate_moves_forward_and_sends_one_pinch_while_held() -> mlua::Result<()> 
         })
     };
     let mut frame = TrackingFrame::default();
-    for height in [1.67, 1.62, 1.62, 1.72] {
-        frame.head = pose(Vec3::new(0.0, height, 0.0));
-        game.tick(&frame, Duration::from_millis(50), false, false)?;
+    for i in 0..120 {
+        frame.head = pose(Vec3::new(0.0, jog_height(i, 1.67), 0.0));
+        game.tick(&frame, Duration::from_millis(10), false, false)?;
     }
     frame.hands[0].0[5] = pose(Vec3::ZERO);
     frame.hands[0].0[10] = pose(Vec3::X * 0.01);
     let (_, offset) = game.tick(&frame, Duration::from_millis(16), false, false)?;
     assert!(offset.z < 0.0);
-    assert_eq!(game.module().raw_get::<u32>("steps")?, 1);
+    assert!(game.module().raw_get::<u32>("steps")? >= 1);
     assert_eq!(game.module().raw_get::<u32>("pinches")?, 1);
 
     frame.head = None;
@@ -146,7 +146,7 @@ fn reflection_lab_keeps_geometry_when_ray_tracing_is_disabled() -> mlua::Result<
     let frame = TrackingFrame::default();
     let (enabled, _) = lab.tick(&frame, Duration::ZERO, false, false)?;
     assert!(enabled.ray_tracing);
-    assert_eq!(enabled.spheres.len(), 6);
+    assert_eq!(enabled.spheres.len(), 7);
     assert_eq!(enabled.traced_boxes, enabled.boxes.len());
     lab.module().raw_set("ray_tracing", false)?;
     let (disabled, _) = lab.tick(&frame, Duration::ZERO, false, false)?;
@@ -174,16 +174,16 @@ fn reflection_lab_walks_towards_gaze_and_renders_controller_hands() -> mlua::Res
         controller_grips: [Some(grip), None],
         ..Default::default()
     };
-    for height in [1.69, 1.65, 1.65, 1.65] {
+    for i in 0..120 {
         frame.head = Some(Pose {
-            position: Vec3::Y * height,
+            position: Vec3::Y * jog_height(i, 1.69),
             orientation: yaw,
         });
-        let (_, offset) = lab.tick(&frame, Duration::from_millis(40), false, false)?;
-        assert_eq!(offset, Vec3::ZERO);
+        lab.tick(&frame, Duration::from_millis(10), false, false)?;
     }
-    frame.head.as_mut().unwrap().position.y = 1.69;
-    let (world, offset) = lab.tick(&frame, Duration::from_millis(40), false, false)?;
+    let (world, offset) = lab.tick(&frame, Duration::from_millis(10), false, false)?;
+    assert_eq!(world.ray_avatar_boxes.len(), 7);
+
     assert!(offset.x > 0.0 && offset.z.abs() < 1e-5 && offset.y == 0.0);
     assert!(
         world.boxes[world.traced_boxes..]
@@ -196,5 +196,55 @@ fn reflection_lab_walks_towards_gaze_and_renders_controller_hands() -> mlua::Res
     frame.head = None;
     let (_, stopped) = lab.tick(&frame, Duration::from_millis(40), false, false)?;
     assert_eq!(turned, stopped);
+    Ok(())
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn same_camera_reflects_a_moving_object_on_successive_frames()
+-> Result<(), Box<dyn std::error::Error>> {
+    use celsius_engine::graphics::{BoxMesh, Scene, SphereMesh, d3d11};
+
+    let shader = "float3 shade_surface(Surface s) { float3 n = normalize(s.normal); return trace_radiance(s.world + n * 0.006, reflect(normalize(s.world - camera.xyz), n)); }";
+    let mut renderer = d3d11::Renderer::new(d3d11::create_device(None)?, shader, None)?;
+    let camera = Camera {
+        position: Vec3::ZERO,
+        orientation: Quat::IDENTITY,
+        fov: [-0.6, 0.6, -0.6, 0.6],
+    };
+    let mut scene = Scene {
+        ray_tracing: true,
+        traced_boxes: 1,
+        spheres: vec![SphereMesh {
+            center: Vec3::new(0.0, 0.0, -3.0),
+            radius: 1.0,
+            color: Vec3::ONE,
+            material: 10.0,
+        }],
+        boxes: vec![BoxMesh {
+            center: Vec3::Z,
+            size: Vec3::splat(1.0),
+            orientation: Quat::from_rotation_y(0.6),
+            color: Vec3::new(2.0, 0.0, 0.0),
+            material: 2.0,
+        }],
+        ..Default::default()
+    };
+    let path = std::env::temp_dir().join(format!("celsius-ray-test-{}.png", std::process::id()));
+    let mut capture = |scene: &Scene| -> Result<[u8; 4], Box<dyn std::error::Error>> {
+        renderer.upload(scene)?;
+        renderer.capture_png(65, 65, camera, 0.0, &path)?;
+        let result = image::open(&path);
+        std::fs::remove_file(&path)?;
+        Ok(result?.into_rgba8().get_pixel(32, 32).0)
+    };
+    let reflected = capture(&scene)?;
+    scene.boxes[0].center.x = 4.0;
+    let moved = capture(&scene)?;
+    assert!(
+        reflected[0] > 200 && reflected[2] == 0,
+        "Pixel was {reflected:?}"
+    );
+    assert!(moved[2] > 100, "Pixel stayed at {moved:?}");
     Ok(())
 }

@@ -28,9 +28,10 @@ mod windows_demo {
         let mut game = None;
         let mut shader = None;
         let mut hdr = None;
-        let mut render_scale = 0.75;
+        let mut render_scale = 1.0;
         let mut lab = false;
         let mut ray_tracing = None;
+        let mut fog = None;
         let mut assets = PathBuf::from("assets/reflection-lab");
         let mut session_options = openxr::SessionOptions::default();
         while let Some(arg) = args.next() {
@@ -60,9 +61,10 @@ mod windows_demo {
                     });
                 }
                 Some("--scale") => render_scale = value()?.to_string_lossy().parse()?,
+                Some("--fog") => fog = Some(value()?.to_string_lossy().parse::<f32>()?),
                 Some("--help") => {
                     println!(
-                        "baseplate [--probe | --preview output.png | --walk-preview output.png] [--lab] [--no-mirror] [--raytracing on|off] [--assets directory] [--loader path] [--game game.lua] [--shader surface.hlsl] [--hdr sky.hdr] [--scale 0.4..1.0]"
+                        "baseplate [--probe | --preview output.png | --walk-preview output.png] [--lab] [--no-mirror] [--raytracing on|off] [--assets directory] [--loader path] [--game game.lua] [--shader surface.hlsl] [--hdr sky.hdr] [--scale 0.4..1.25] [--fog 0..0.5]"
                     );
                     return Ok(());
                 }
@@ -121,6 +123,9 @@ mod windows_demo {
         if let Some(enabled) = ray_tracing {
             scene.module().raw_set("ray_tracing", enabled)?;
         }
+        if let Some(density) = fog {
+            scene.module().raw_set("volumetric_density", density)?;
+        }
         match mode {
             Mode::Probe => unreachable!(),
             Mode::Headset => openxr::run_session(
@@ -152,20 +157,19 @@ mod windows_demo {
                     ..Default::default()
                 };
                 let elapsed = Duration::from_millis(20);
-                for height in [1.69, 1.65, 1.65, 1.65, 1.65, 1.65, 1.69]
-                    .into_iter()
-                    .cycle()
-                    .take(28)
-                {
-                    head.position.y = height;
+                for i in 0..58 {
+                    head.position.y = 1.69
+                        + 0.009
+                            * (i as f32 * elapsed.as_secs_f32() * std::f32::consts::TAU * 2.6)
+                                .sin();
                     tracking.head = Some(head);
                     scene.tick(&tracking, elapsed, false, false)?;
                 }
                 let (world, offset) = scene.tick(&tracking, elapsed, false, false)?;
                 let camera = Camera {
                     position: head.position + offset,
-                    orientation: Quat::from_rotation_x(-0.10),
-                    fov: [-0.88, 0.88, -0.50, 0.50],
+                    orientation: Quat::from_rotation_x(-0.37),
+                    fov: [-0.88, 0.88, -0.68, 0.68],
                 };
                 let mut renderer = renderer(d3d11::create_device(None)?)?;
                 renderer.upload(&world)?;
@@ -204,11 +208,10 @@ mod windows_demo {
                     hands: [synthetic_hand(-1.0), synthetic_hand(1.0)],
                     ..Default::default()
                 };
-                for (height, frames) in [(1.67, 1), (1.62, 8), (1.72, 1), (1.67, 18)] {
-                    tracking.head.as_mut().unwrap().position.y = height;
-                    for _ in 0..frames {
-                        scene.tick(&tracking, Duration::from_millis(16), false, true)?;
-                    }
+                for i in 0..72 {
+                    tracking.head.as_mut().unwrap().position.y =
+                        1.67 + 0.01 * (i as f32 * 0.016 * std::f32::consts::TAU * 2.6).sin();
+                    scene.tick(&tracking, Duration::from_millis(16), false, true)?;
                 }
                 let hand = &mut tracking.hands[1].0;
                 hand[5].as_mut().unwrap().position = hand[10].unwrap().position + Vec3::X * 0.012;
